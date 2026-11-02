@@ -1,0 +1,1085 @@
+Import React, { useState, useRef, useEffect, lazy, Suspense, memo, useMemo } from "react";
+import {
+  Copy,
+  CheckCheck,
+  ChevronUp,
+  ChevronDown,
+  Play,
+  Maximize2,
+  Download,
+  File,
+  ExternalLink,
+  ShieldAlert,
+  ArrowDown,
+  Server,
+  Code2,
+  RotateCcw
+} from "lucide-react";
+import { copyToClipboard } from "../lib/utils";
+import { toast } from "sonner";
+import { HtmlPreviewModal } from "./HtmlPreviewModal";
+import { auth } from "../firebase";
+import { getDeviconUrl } from "../utils/devicons";
+
+const highlightCache = new Map<string, string>();
+
+const highlightLine = (line: string) => {
+  if (!line) return "";
+  const keywords = new Set(["const", "let", "var", "function", "return", "if", "else", "for", "while", "class", "import", "export", "from", "default", "interface", "type", "public", "private", "protected", "async", "await", "new", "this", "super", "extends", "implements", "true", "false", "null", "undefined", "switch", "case", "break", "continue", "DOCTYPE", "html", "head", "body", "meta", "title", "style", "script", "link", "div", "span", "p", "a"]);
+  
+  let result = "";
+  let i = 0;
+  
+  const escapeHtml = (str: string) => str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  while (i < line.length) {
+    if (line.startsWith('//', i) || line.startsWith('/*', i)) {
+      result += `<span style="color: #a8ff60; font-style: italic">${escapeHtml(line.substring(i))}</span>`;
+      break;
+    }
+
+    if (line[i] === '"' || line[i] === "'" || line[i] === "`") {
+      const quote = line[i];
+      let end = i + 1;
+      while (end < line.length && line[end] !== quote) {
+        if (line[end] === '\\') end++;
+        end++;
+      }
+      if (end < line.length) end++;
+      result += `<span style="color: #f1fa8c">${escapeHtml(line.substring(i, end))}</span>`;
+      i = end;
+      continue;
+    }
+
+    if (/[a-zA-Z_$]/.test(line[i])) {
+      let end = i + 1;
+      while (end < line.length && /[a-zA-Z0-9_$-]/.test(line[end])) {
+        end++;
+      }
+      const word = line.substring(i, end);
+      
+      let j = end;
+      while(j < line.length && /\s/.test(line[j])) j++;
+      if (j < line.length && line[j] === '(') {
+         result += `<span style="color: #50fa7b; font-weight: bold">${escapeHtml(word)}</span>`;
+      } else if (keywords.has(word) || keywords.has(word.toLowerCase())) {
+         result += `<span style="color: #ff79c6; font-weight: bold">${escapeHtml(word)}</span>`;
+      } else {
+         result += escapeHtml(word);
+      }
+      
+      i = end;
+      continue;
+    }
+
+    if (/[0-9]/.test(line[i])) {
+      let end = i + 1;
+      while (end < line.length && /[0-9.]/.test(line[end])) end++;
+      result += `<span style="color: #bd93f9">${escapeHtml(line.substring(i, end))}</span>`;
+      i = end;
+      continue;
+    }
+
+    if (line[i] === '<' || line[i] === '>') {
+      result += `<span style="color: #ff79c6">${escapeHtml(line[i])}</span>`;
+      i++;
+      continue;
+    }
+
+    result += escapeHtml(line[i]);
+    i++;
+  }
+
+  return result;
+};
+
+const highlightLineCached = (line: string) => {
+  if (!line) return "";
+  if (line.length > 2000) return line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const cached = highlightCache.get(line);
+  if (cached !== undefined) return cached;
+  const result = highlightLine(line);
+  if (highlightCache.size > 8000) highlightCache.clear();
+  highlightCache.set(line, result);
+  return result;
+};
+
+const NativeHighlighter = memo(({ code, chatId, codeWrap }: { code: string, chatId?: string | null, codeWrap?: boolean, isGenerating?: boolean }) => {
+  const lines = useMemo(() => {
+    if (!code) return [""];
+    const rawLines = code.split("\n");
+    if (code.length > 300000) {
+      return rawLines.map(l => l.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"));
+    }
+    return rawLines.map(highlightLineCached);
+  }, [code]);
+
+  return (
+    <div className="w-full overflow-x-auto custom-scrollbar bg-transparent">
+      <table className="w-full border-collapse font-mono text-[13px] leading-[1.5]">
+        <tbody>
+          {lines.map((lineHtml, i) => (
+            <tr key={i} className="hover:bg-white/[0.04] transition-colors group">
+              <td 
+                className="select-none text-right pr-2 pl-0.5 text-white/30 group-hover:text-white/70 align-top shrink-0 font-mono text-[11px] py-0.5 bg-transparent whitespace-nowrap"
+                style={{ width: "1%" }}
+              >
+                {i + 1}
+              </td>
+              <td 
+                className={`pl-1 pr-2 align-top font-mono py-0.5 text-[#d4d4d4] ${
+                  codeWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'
+                }`}
+                dangerouslySetInnerHTML={{ __html: lineHtml || '&nbsp;' }}
+              />
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+});
+
+export const CodeBlock = memo(function CodeBlock({
+  language,
+  code,
+  userSettings,
+  fullMessageContent,
+  onAnalyzeSecurity,
+  onAskAI,
+  isGenerating,
+  hideHeader,
+  chatId,
+}: {
+  language: string;
+  code: string;
+  userSettings: any;
+  fullMessageContent?: string;
+  onAnalyzeSecurity?: (code: string) => void;
+  onAskAI?: (code: string) => void;
+  isGenerating?: boolean;
+  hideHeader?: boolean;
+  chatId?: string | null;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(!!isGenerating);
+  const [isFullScreen, setIsFullScreen] = useState(false);
+  const [isConstrained, setIsConstrained] = useState(true);
+  const [downloadState, setDownloadState] = useState<"idle" | "downloading" | "success">("idle");
+  const [showHtmlPreview, setShowHtmlPreview] = useState(false);
+  const [iconError, setIconError] = useState(false);
+
+  const deviconUrl = useMemo(() => getDeviconUrl(language), [language]);
+
+  const codeContainerRef = useRef<HTMLDivElement>(null);
+  const scrollPositionRef = useRef<number>(0);
+
+  const lineCount = useMemo(() => (code ? code.split("\n").length : 0), [code]);
+  const isLongCode = lineCount > 15;
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    scrollPositionRef.current = e.currentTarget.scrollTop;
+  };
+
+  const scrollToBottom = () => {
+    if (codeContainerRef.current) {
+      codeContainerRef.current.scrollTo({
+        top: codeContainerRef.current.scrollHeight,
+        behavior: "smooth"
+      });
+      scrollPositionRef.current = codeContainerRef.current.scrollHeight;
+    }
+  };
+
+  const isSelectingTextRef = useRef(false);
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      const selection = window.getSelection();
+      isSelectingTextRef.current = selection && selection.toString().length > 0;
+    };
+    document.addEventListener("selectionchange", handleSelectionChange);
+    return () => document.removeEventListener("selectionchange", handleSelectionChange);
+  }, []);
+
+  useEffect(() => {
+    if (isGenerating && codeContainerRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = codeContainerRef.current;
+      const isNearBottom = scrollHeight - scrollTop - clientHeight < 100;
+      
+      if (isNearBottom && !isSelectingTextRef.current) {
+        requestAnimationFrame(() => {
+          if (codeContainerRef.current) {
+             codeContainerRef.current.scrollTo({
+               top: codeContainerRef.current.scrollHeight,
+               behavior: "auto"
+             });
+          }
+        });
+      }
+    }
+  }, [code, isGenerating]);
+
+  const handleCopy = async () => {
+    await copyToClipboard(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleDownload = async () => {
+    setDownloadState("downloading");
+    try {
+      let useFallback = false;
+      const suggestedName = `code_${Date.now()}.${language || "txt"}`;
+      
+      if ('showSaveFilePicker' in window) {
+        try {
+          const handle = await (window as any).showSaveFilePicker({
+            suggestedName,
+            types: [{ description: 'Code file', accept: { 'text/plain': [`.${language || "txt"}`] } }],
+          });
+          const writable = await handle.createWritable();
+          await writable.write(code);
+          await writable.close();
+        } catch (err: any) {
+          if (err.name === 'AbortError') {
+            setDownloadState("idle");
+            return;
+          }
+          useFallback = true;
+        }
+      } else {
+        useFallback = true;
+      }
+
+      if (useFallback) {
+        const blob = new Blob([code], { type: "text/plain" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = suggestedName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+      
+      setDownloadState("success");
+      setTimeout(() => setDownloadState("idle"), 1500);
+    } catch (err) {
+      setDownloadState("idle");
+    }
+  };
+
+  const handlePreviewHtml = () => {
+    setShowHtmlPreview(true);
+  };
+
+  return (
+    <>
+      {isFullScreen && (
+        <div className="extended-editor-modal fixed inset-0 z-[200] bg-black/95 backdrop-blur-xl flex flex-col p-0 animate-in fade-in zoom-in duration-300">
+          <div className="flex items-center justify-between p-3 sm:p-4 border-b border-white/10 bg-bg-surface text-white">
+            <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-white/90 font-mono text-xs font-bold uppercase tracking-wider shrink-0">
+                {deviconUrl && !iconError ? (
+                  <img src={deviconUrl} alt={language} className="w-4 h-4 object-contain" onError={() => setIconError(true)} />
+                ) : (
+                  <Code2 size={14} className="stroke-[2.5]" />
+                )}
+                <span className="truncate max-w-[100px] sm:max-w-none">{language || "text"}</span>
+              </div>
+              <span className="text-xs font-mono text-white/40 shrink-0">
+                {lineCount} {lineCount === 1 ? "linha" : "linhas"}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+              {(language?.toLowerCase() === "html" || language?.toLowerCase() === "svg") && (
+                <button
+                  onClick={handlePreviewHtml}
+                  className="h-8 px-3 rounded-lg bg-white/5 hover:bg-white/10 text-white/80 hover:text-white border border-white/15 transition-all active:scale-95 flex items-center justify-center gap-1.5 text-xs font-medium"
+                >
+                  <Play size={14} strokeWidth={2.2} />
+                  <span>Testar</span>
+                </button>
+              )}
+
+              <button
+                onClick={handleDownload}
+                className={`h-8 px-3 rounded-lg transition-all border active:scale-95 flex items-center gap-1.5 text-xs text-white/80 ${
+                  downloadState === 'success' ? 'bg-green-500/20 text-green-400 border-green-500/30' : 
+                  downloadState === 'downloading' ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30 animate-pulse' : 
+                  'bg-white/5 hover:bg-white/10 border-white/10'
+                }`}
+              >
+                {downloadState === 'success' ? <CheckCheck size={14} /> : <Download size={14} />}
+                <span className="hidden sm:inline">Download</span>
+              </button>
+
+              <button
+                onClick={handleCopy}
+                className="h-8 px-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 transition-colors text-xs text-white/80 flex items-center gap-1.5"
+              >
+                {copied ? <CheckCheck size={14} className="text-emerald-400" /> : <Copy size={14} />}
+                <span>{copied ? "Copiado!" : "Copiar"}</span>
+              </button>
+
+              <button
+                onClick={() => setIsFullScreen(false)}
+                className="h-8 p-2 bg-white/5 hover:bg-white/10 border border-white/10 text-white/70 hover:text-white rounded-lg transition-colors"
+              >
+                <Maximize2 size={16} className="rotate-180" />
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 overflow-auto bg-bg-code">
+             <div className="p-3 sm:p-6 font-mono text-sm">
+                <NativeHighlighter code={code} chatId={chatId} codeWrap={userSettings?.codeWrap} isGenerating={isGenerating} />
+             </div>
+          </div>
+        </div>
+      )}
+
+      <div className={`overflow-hidden bg-bg-code w-full max-w-full min-w-0 ${hideHeader ? "my-0 rounded-none border-none h-full flex flex-col" : "my-4 rounded-xl border border-border-strong"}`}>
+        {!hideHeader && (
+          <div className="flex items-center justify-between px-2 sm:px-3 py-1.5 bg-bg-code-header text-text-muted text-xs font-sans w-full custom-scrollbar gap-2 border-b border-border-subtle/40">
+            <div className="flex items-center gap-2 shrink-0 min-w-0">
+              <div className="flex items-center gap-1.5 px-2 py-0.5 h-7 rounded-md bg-white/5 border border-white/10 text-white/90 font-mono text-[11px] font-bold uppercase tracking-wider shrink-0">
+                {deviconUrl && !iconError ? (
+                  <img src={deviconUrl} alt={language} className="w-3.5 h-3.5 object-contain" onError={() => setIconError(true)} />
+                ) : (
+                  <Code2 size={13} className="stroke-[2.5]" />
+                )}
+                <span className="truncate max-w-[80px] sm:max-w-none">{language || "text"}</span>
+              </div>
+              <span className="text-[11px] font-mono text-text-muted/70 shrink-0">
+                {lineCount} {lineCount === 1 ? "linha" : "linhas"}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+              {(language?.toLowerCase() === "html" || language?.toLowerCase() === "svg") && (
+                <button
+                  onClick={handlePreviewHtml}
+                  className="h-7 w-7 rounded-md bg-white/5 hover:bg-white/10 text-white/70 hover:text-white transition-all border border-white/5 flex items-center justify-center shrink-0"
+                  title="Testar / Visualizar HTML"
+                >
+                  <Play size={14} strokeWidth={2.2} />
+                </button>
+              )}
+
+              <button
+                onClick={() => setIsExpanded(!isExpanded)}
+                className="h-7 w-7 rounded-md bg-white/5 hover:bg-white/10 text-white/70 hover:text-white transition-all border border-white/5 flex items-center justify-center shrink-0"
+                title={isExpanded ? "Recolher código" : "Expandir código"}
+              >
+                {isExpanded ? <ChevronUp size={14} strokeWidth={2.2} /> : <ChevronDown size={14} strokeWidth={2.2} />}
+              </button>
+
+              <button
+                onClick={() => setIsFullScreen(true)}
+                className="h-7 w-7 rounded-md bg-white/5 hover:bg-white/10 text-white/70 hover:text-white transition-all border border-white/5 flex items-center justify-center shrink-0"
+                title="Expandir em tela cheia"
+              >
+                <Maximize2 size={14} strokeWidth={2.2} />
+              </button>
+
+              <button
+                onClick={handleDownload}
+                className={`h-7 w-7 rounded-md transition-all border flex items-center justify-center shrink-0 ${
+                  downloadState === 'success' ? 'bg-green-500/20 text-green-400 border-green-500/30' : 
+                  downloadState === 'downloading' ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30 animate-pulse' : 
+                  'bg-white/5 hover:bg-white/10 text-white/70 border-white/5'
+                }`}
+                title="Baixar arquivo"
+              >
+                {downloadState === 'success' ? <CheckCheck size={14} strokeWidth={2.3} /> : <Download size={14} strokeWidth={2.2} />}
+              </button>
+
+              <button
+                onClick={handleCopy}
+                className="h-7 w-7 rounded-md bg-white/5 hover:bg-white/10 text-white/70 hover:text-white transition-all border border-white/5 flex items-center justify-center shrink-0"
+                title={copied ? "Copiado!" : "Copiar"}
+              >
+                {copied ? <CheckCheck size={14} strokeWidth={2.3} className="text-emerald-400" /> : <Copy size={14} strokeWidth={2.2} />}
+              </button>
+            </div>
+          </div>
+        )}
+        {(isExpanded || hideHeader) && (
+          <div className="relative group">
+            <div 
+              ref={codeContainerRef}
+              onScroll={handleScroll}
+              className={`p-4 overflow-x-auto overscroll-contain text-[13px] font-mono custom-scrollbar ${isConstrained && isLongCode && !hideHeader && !isFullScreen ? 'max-h-[50vh] overflow-y-auto' : ''} ${hideHeader || isFullScreen ? 'flex-1 overflow-y-auto' : ''}`}
+            >
+              <NativeHighlighter code={code} chatId={chatId} codeWrap={userSettings?.codeWrap} isGenerating={isGenerating} />
+            </div>
+            
+            {isConstrained && isLongCode && (
+              <button
+                onClick={scrollToBottom}
+                className="absolute bottom-4 right-4 bg-bg-surface border border-border-strong text-text-muted hover:text-primary p-2.5 rounded-xl shadow-xl opacity-20 hover:opacity-100 transition-opacity z-10"
+              >
+                <ArrowDown size={18} />
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      <HtmlPreviewModal 
+         isOpen={showHtmlPreview} 
+         onClose={() => setShowHtmlPreview(false)} 
+         code={code} 
+         chatId={chatId}
+         isGenerating={isGenerating}
+      />
+    </>
+  );
+});
+DEV AI V4 — REFINAMENTO COMPLETO DA EXPERIÊNCIA
+
+Continue trabalhando no projeto existente.
+
+A interface está evoluindo, mas algumas implementações ficaram visualmente ruins e outras copiaram elementos que não deveriam ter sido copiados das referências.
+
+Quero que você faça uma revisão cuidadosa e corrija esses problemas.
+
+REGRA PRINCIPAL SOBRE AS REFERÊNCIAS
+
+Vou fornecer referências visuais diferentes:
+
+Um vídeo mostrando como quero a interface de configurações.
+
+Um exemplo de bloco de código mostrando exatamente como quero sua aparência.
+
+Analise cada referência separadamente.
+
+IMPORTANTE:
+
+Copie os conceitos visuais e os comportamentos dos componentes.
+
+NÃO copie nomes de usuários.
+
+NÃO copie fotos de perfil.
+
+NÃO copie nomes de aplicativos de terceiros.
+
+NÃO copie informações pessoais presentes nos vídeos.
+
+NÃO copie textos ou identificações que pertençam ao aplicativo de referência.
+
+A identidade do nosso aplicativo continuará sendo DEV AI.
+
+Não utilize emojis em nenhuma parte da aplicação. Utilize exclusivamente ícones gráficos profissionais, preferencialmente Lucide Icons ou SVGs reais.
+
+1. MENSAGENS DO USUÁRIO — AÇÕES ABAIXO DA MENSAGEM
+
+Atualmente, as mensagens do usuário não possuem as ações que eu quero.
+
+Adicione uma pequena barra de ações ABAIXO de cada mensagem enviada pelo usuário.
+
+Ela deverá conter:
+
+Botão de copiar.
+
+Botão de três pontinhos.
+
+Não coloque essas ações dentro do bloco da mensagem.
+
+MENU DE TRÊS PONTINHOS
+
+Ao clicar, abra um menu contextual premium contendo:
+
+Horário em que a mensagem foi enviada.
+
+Copiar mensagem.
+
+Selecionar texto.
+
+Editar mensagem.
+
+EDITAR MENSAGEM
+
+Essa funcionalidade precisa ser implementada corretamente.
+
+Quando o usuário clicar em editar:
+
+O conteúdo original deverá aparecer novamente no campo de mensagem.
+
+O usuário poderá modificar o texto.
+
+O usuário poderá cancelar a edição.
+
+Ao confirmar, a mensagem anterior deverá ser atualizada.
+
+As respostas da IA posteriores àquela mensagem deverão ser removidas da conversa atual.
+
+A IA deverá receber a mensagem editada e gerar uma nova resposta.
+
+Não crie uma mensagem duplicada.
+
+Não deixe respostas antigas aparecendo como se ainda correspondessem à pergunta editada.
+
+Preserve corretamente o histórico anterior à mensagem editada.
+
+2. REDESIGN VISUAL — PREMIUM UI
+
+A interface está ficando um pouco feia em alguns pontos.
+
+Quero elevar bastante a qualidade visual.
+
+Utilize como referência a qualidade de acabamento dos melhores aplicativos de IA, principalmente ChatGPT.
+
+Não quero simplesmente uma interface preta com botões arredondados.
+
+Quero atenção aos detalhes:
+
+Bordas sofisticadas.
+
+Strokes avançados.
+
+Contornos discretos.
+
+Camadas de profundidade.
+
+Sombras naturais.
+
+Gradientes muito sutis, somente quando necessários.
+
+Hierarquia visual.
+
+Espaçamentos precisos.
+
+Tipografia consistente.
+
+Animações fluidas.
+
+Estados de interação refinados.
+
+Os componentes deverão parecer pertencer ao mesmo sistema de design.
+
+BORDAS E STROKES
+
+Trabalhe cuidadosamente nas bordas.
+
+Quero:
+
+Contornos com transparência.
+
+Separação entre superfícies.
+
+Bordas internas sutis.
+
+Destaques discretos ao receber foco.
+
+Estados de hover elegantes.
+
+Cantos arredondados consistentes.
+
+Não exagere nas bordas nem utilize contornos grossos.
+
+O resultado deverá transmitir qualidade de um produto comercial.
+
+3. REMOVER CONTADOR DE TOKENS
+
+Existe um contador de tokens no topo da aplicação que foi adicionado indevidamente.
+
+REMOVA COMPLETAMENTE ESSE ELEMENTO.
+
+Não quero:
+
+Contador de tokens.
+
+Indicador de consumo de tokens.
+
+Informações de tokens no header.
+
+Não substitua por outro contador.
+
+Mantenha o topo limpo.
+
+4. DROPDOWNS PREMIUM
+
+Os dropdowns atuais estão parecendo componentes HTML padrão.
+
+Não quero isso.
+
+Reconstrua o sistema de dropdowns com componentes personalizados.
+
+Todos deverão possuir:
+
+Animação de abertura.
+
+Animação de fechamento.
+
+Fundo adaptado ao tema.
+
+Bordas premium.
+
+Strokes sutis.
+
+Sombra refinada.
+
+Ícones Lucide.
+
+Estados de seleção.
+
+Hover elegante.
+
+Posicionamento inteligente.
+
+Fechamento ao clicar fora.
+
+Navegação por teclado.
+
+Não utilize o select padrão do navegador para os componentes principais.
+
+Os menus deverão parecer componentes nativos de uma plataforma profissional de IA.
+
+5. IDENTIDADE E NOME DO APLICATIVO
+
+O nome correto da nossa plataforma é:
+
+DEV AI
+
+Não utilize "Devi Lite", "Dev AI Lite" ou nomes copiados de aplicativos que aparecem nas referências.
+
+Não altere a identidade da plataforma.
+
+Mantenha:
+
+Nome DEV AI.
+
+Identidade visual própria.
+
+Avatar padrão da IA.
+
+Nome padrão da IA.
+
+Aparência consistente.
+
+Também não copie o nome ou a foto do usuário que aparece nos vídeos.
+
+Até existir uma configuração real de perfil, utilize a identificação padrão já definida no nosso projeto.
+
+6. BOTÃO DE INTERRUPÇÃO DA GERAÇÃO
+
+Atualmente, quando a IA está respondendo, aparece uma bolinha vermelha com um X.
+
+Não quero esse design.
+
+Substitua por um botão quadrado clássico de interrupção, semelhante ao utilizado no ChatGPT.
+
+Características:
+
+Formato quadrado.
+
+Cantos arredondados.
+
+Fundo neutro.
+
+Ícone de stop no centro.
+
+Tamanho discreto.
+
+Animação sutil.
+
+Boa acessibilidade.
+
+Esse botão deverá interromper a geração de verdade através do provedor de IA.
+
+Não deixe apenas um botão visual.
+
+7. HISTÓRICO DE CONVERSAS
+
+Melhore o gerenciamento do histórico.
+
+Cada conversa deverá possuir um menu de três pontinhos.
+
+Ao clicar, disponibilize:
+
+Renomear conversa.
+
+Excluir conversa.
+
+RENOMEAR
+
+Ao clicar:
+
+Abrir um pequeno modal elegante.
+
+Mostrar o nome atual.
+
+Permitir inserir um novo nome.
+
+Salvar a alteração.
+
+Atualizar imediatamente a sidebar.
+
+EXCLUIR CONVERSA
+
+Não quero exclusão permanente imediata.
+
+Quando o usuário excluir um chat, ele deverá ser enviado para a LIXEIRA.
+
+Não apague definitivamente a conversa nesse momento.
+
+LIXEIRA NAS CONFIGURAÇÕES
+
+Adicione uma seção chamada Lixeira dentro das configurações.
+
+Nela deverão aparecer as conversas excluídas.
+
+Cada conversa deverá possuir:
+
+Nome.
+
+Data de exclusão.
+
+Opção de restaurar.
+
+Opção de excluir permanentemente.
+
+Adicione também a opção de esvaziar a lixeira, com confirmação.
+
+A exclusão permanente só deverá acontecer quando o usuário escolher essa opção.
+
+Preserve os dados corretamente no armazenamento local e prepare a estrutura para sincronização futura com o backend.
+
+8. REDESIGN COMPLETO DAS CONFIGURAÇÕES
+
+Vou enviar um vídeo mostrando EXCLUSIVAMENTE como quero a interface de configurações.
+
+Analise esse vídeo antes de implementar.
+
+Quero que você reproduza os conceitos visuais:
+
+Organização dos menus.
+
+Navegação entre categorias.
+
+Espaçamento.
+
+Aparência dos botões.
+
+Bordas.
+
+Strokes.
+
+Animações.
+
+Hierarquia dos textos.
+
+Layout dos painéis.
+
+Não copie nomes, fotos, informações ou identidade do aplicativo mostrado no vídeo.
+
+Mantenha a identidade DEV AI.
+
+As configurações deverão possuir uma interface própria, moderna e integrada ao restante do aplicativo.
+
+Inclua as opções existentes e adicione a Lixeira.
+
+Não remova configurações que já funcionam.
+
+9. SELETOR DE MODELOS DA IA
+
+O campo de troca de modelos continua visualmente feio.
+
+Quero que você faça um redesign completo desse componente.
+
+Ele deverá possuir aparência semelhante ao seletor de modelos do ChatGPT.
+
+CABEÇALHO DO SELETOR
+
+Mostre:
+
+Nome do modelo selecionado.
+
+Ícone apropriado.
+
+Indicador discreto de dropdown.
+
+MENU ABERTO
+
+Ao clicar, deverá aparecer um painel premium.
+
+Organize os modelos com:
+
+Nome.
+
+Descrição curta.
+
+Identificação do provedor, quando disponível.
+
+Indicador do modelo selecionado.
+
+Separação visual por categorias, se necessário.
+
+Adicione animações suaves.
+
+O menu deverá possuir:
+
+Fundo bem definido.
+
+Bordas refinadas.
+
+Sombra discreta.
+
+Strokes.
+
+Espaçamento adequado.
+
+Não quero um dropdown padrão.
+
+Não invente modelos conectados.
+
+Os modelos deverão vir da configuração real do backend ou da lista de provedores disponíveis.
+
+Se nenhum modelo estiver conectado, mostre um estado vazio bonito e informativo.
+
+10. ESTADO DE DIGITAÇÃO DA IA
+
+Atualmente, enquanto a IA está digitando, aparece o nome DEV AI duplicado e os três pontinhos aparecem em uma posição errada.
+
+Corrija completamente.
+
+Quero apenas uma identificação da IA.
+
+NOVA ESTRUTURA
+
+Ao lado do nome DEV AI, deverá aparecer o estado atual da atividade.
+
+Exemplos:
+
+Conectando...
+
+Pensando...
+
+Analisando solicitação...
+
+Preparando código...
+
+Escrevendo resposta...
+
+Explicando...
+
+Finalizando resposta...
+
+O texto deverá mudar conforme a atividade real.
+
+Não utilize estados aleatórios que não correspondam ao processamento.
+
+Os três pontinhos animados deverão aparecer somente uma vez e em uma posição visualmente correta.
+
+Não duplique:
+
+Avatar.
+
+Nome.
+
+Cabeçalho.
+
+Indicador de digitação.
+
+CONTADOR DE TEMPO
+
+Ao lado do estado da IA, adicione um pequeno indicador de tempo.
+
+Exemplo:
+
+DEV AI · Pensando... · 00:04
+
+Esse contador deverá medir o tempo real desde o início da geração.
+
+Ao finalizar:
+
+Pare o cronômetro.
+
+Preserve o tempo total da geração.
+
+Mostre o tempo final junto às informações da resposta, de forma discreta.
+
+Não adicione contador de tokens.
+
+TRANSIÇÕES DE ESTADO
+
+Implemente transições suaves entre as atividades.
+
+O estado deverá acompanhar os eventos reais do provedor de IA sempre que disponíveis.
+
+Não exiba "Preparando código" se a IA não estiver realmente executando essa etapa.
+
+11. BLOCO DE CÓDIGO — NOVA REFERÊNCIA
+
+Vou fornecer um exemplo específico de bloco de código.
+
+Analise cuidadosamente esse exemplo.
+
+Quero que o bloco de código do DEV AI fique visualmente muito próximo dele.
+
+Observe:
+
+Cabeçalho.
+
+Logotipo da linguagem.
+
+Fundo.
+
+Bordas.
+
+Strokes.
+
+Números de linha.
+
+Tipografia monoespaçada.
+
+Espaçamento.
+
+Botões.
+
+Contador de linhas.
+
+Destaque de sintaxe.
+
+Não invente um layout diferente antes de analisar a referência.
+
+Preserve as funcionalidades que já foram implementadas:
+
+Copiar.
+
+Download.
+
+Contador de linhas.
+
+Syntax highlighting.
+
+Preview de HTML.
+
+Botão Play exclusivo para HTML.
+
+Adapte o design ao sistema Light/Dark.
+
+12. PROIBIÇÃO DE EMOJIS
+
+Esta regra é obrigatória para toda a aplicação.
+
+Não utilize emojis em:
+
+Sidebar.
+
+Header.
+
+Configurações.
+
+Dropdowns.
+
+Mensagens.
+
+Avatares.
+
+Modelos.
+
+Botões.
+
+Notificações.
+
+Histórico.
+
+Lixeira.
+
+Blocos de código.
+
+Estados da IA.
+
+Utilize somente:
+
+Lucide Icons.
+
+SVGs.
+
+Logotipos reais.
+
+Ícones profissionais.
+
+Não utilize emojis nem mesmo como substitutos temporários.
+
+13. REVISÃO GERAL E TESTES
+
+Antes de finalizar, revise a aplicação inteira.
+
+Verifique especialmente:
+
+Ações abaixo das mensagens do usuário.
+
+Copiar mensagem do usuário.
+
+Selecionar texto.
+
+Editar mensagem.
+
+Regenerar respostas após edição.
+
+Remoção do contador de tokens.
+
+Dropdowns personalizados.
+
+Botão quadrado de interrupção.
+
+Renomear conversas.
+
+Enviar conversas para a lixeira.
+
+Restaurar conversas.
+
+Excluir permanentemente.
+
+Nova interface de configurações.
+
+Novo seletor de modelos.
+
+Identificação da IA sem duplicação.
+
+Indicadores de atividade.
+
+Cronômetro de geração.
+
+Novo bloco de código.
+
+Teste em desktop e celular.
+
+Não deixe botões sem comportamento.
+
+Não destrua funcionalidades existentes.
+
+RESULTADO ESPERADO
+
+Quero que o DEV AI tenha aparência de uma plataforma comercial de inteligência artificial.
+
+A referência de qualidade visual será o ChatGPT, mas a identidade deverá continuar sendo nossa.
+
+Quero uma interface:
+
+Sofisticada.
+
+Minimalista.
+
+Moderna.
+
+Consistente.
+
+Responsiva.
+
+Com bordas e strokes premium.
+
+Sem emojis.
+
+Sem componentes HTML padrão com aparência genérica.
+
+Não faça apenas uma alteração superficial.
+
+Revise os componentes e implemente as mudanças corretamente.
+
+Entregue o projeto completo atualizado, com todos os arquivos necessários.
