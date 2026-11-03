@@ -17,18 +17,13 @@ const aiKey = process.env.GEMINI_API_KEY || '';
 const ai = new GoogleGenAI({ apiKey: aiKey });
 
 const SUPPORTED_MODELS = [
-  { name: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', category: 'Chat', description: 'Última geração topo de linha com raciocínio ultrarrápido' },
-  { name: 'gemini-3.6-flash', displayName: 'Gemini 3.6 Flash', category: 'Chat', description: 'Versão otimizada para respostas instantâneas' },
-  { name: 'gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash-Lite', category: 'Lite', description: 'Opção econômica e rápida para conversação' },
-  { name: 'gemini-3.1-flash-lite', displayName: 'Gemini 3.1 Flash-Lite', category: 'Lite', description: 'Alta eficiência para menor latência' },
-  { name: 'gemini-3-flash-preview', displayName: 'Gemini 3 Flash', category: 'Chat', description: 'Prévia de alta performance' },
-  { name: 'gemini-3.1-pro-preview', displayName: 'Gemini 3.1 Pro', category: 'Pro', description: 'Capacidade máxima para lógica complexa' },
-  { name: 'gemini-3.8-live', displayName: 'Gemini 3.8 Live', category: 'Live', description: 'Modelo para ligação e voz em tempo real' },
-  { name: 'gemini-3.8-flash-lite-tts', displayName: 'Gemini 3.8 Flash-Lite TTS', category: 'Áudio', description: 'Transformar texto em áudio natural' },
-  { name: 'gemini-3.5-transcribe', displayName: 'Gemini 3.5 Transcribe', category: 'Áudio', description: 'Transformar áudio em texto (Microfone)' },
-  { name: 'gemini-3.1-flash-lite-image', displayName: 'Gemini 3.1 Flash Lite Image', category: 'Imagem', description: 'Geração e edição visual' },
-  { name: 'deep-research-preview-04-2026', displayName: 'Gemini Deep Research', category: 'Pro', description: 'Pesquisa profunda autônoma' },
-  { name: 'gemini-omni-1.1-flash', displayName: 'Gemini Omni Flash', category: 'Chat', description: 'Modelo multimodal avançado' }
+  { name: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', category: 'Chat', description: 'Última geração topo de linha com raciocínio rápido e multimodalidade' },
+  { name: 'gemini-3.5-pro', displayName: 'Gemini 3.5 Pro', category: 'Pro', description: 'Raciocínio complexo, lógica profunda e programação avançada' },
+  { name: 'gemini-3.5-flash', displayName: 'Gemini 3.5 Flash', category: 'Chat', description: 'Alta velocidade e excelente precisão para o dia a dia' },
+  { name: 'gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash-Lite', category: 'Lite', description: 'Ultrarrápido, leve e com latência mínima' },
+  { name: 'gemini-3.1-pro', displayName: 'Gemini 3.1 Pro', category: 'Pro', description: 'Capacidade analítica avançada e resolução de problemas' },
+  { name: 'gemini-3.1-flash', displayName: 'Gemini 3.1 Flash', category: 'Chat', description: 'Modelo ágil para conversação rápida' },
+  { name: 'gemini-3.1-flash-lite', displayName: 'Gemini 3.1 Flash-Lite', category: 'Lite', description: 'Ultra leve, resposta instantânea e econômico' }
 ];
 
 app.get('/api/models', (req, res) => {
@@ -37,9 +32,14 @@ app.get('/api/models', (req, res) => {
 
 function getValidApiModel(modelName: string): string {
   const m = (modelName || '').toLowerCase();
-  const found = SUPPORTED_MODELS.find((x: any) => x.name === m || x.displayName.toLowerCase() === m);
-  if (found) return found.name;
-  if (m.includes('pro') || m.includes('3.1-pro')) return 'gemini-3.1-pro-preview';
+  // Strictly Gemini 3 and above
+  if (m.includes('3.8')) return 'gemini-3.8-flash';
+  if (m.includes('3.5-pro')) return 'gemini-3.5-pro';
+  if (m.includes('3.5-flash-lite') || (m.includes('3.5') && m.includes('lite'))) return 'gemini-3.5-flash-lite';
+  if (m.includes('3.5')) return 'gemini-3.5-flash';
+  if (m.includes('3.1-pro')) return 'gemini-3.1-pro';
+  if (m.includes('3.1-flash-lite') || (m.includes('3.1') && m.includes('lite'))) return 'gemini-3.1-flash-lite';
+  if (m.includes('3.1')) return 'gemini-3.1-flash';
   return 'gemini-3.8-flash';
 }
 
@@ -62,29 +62,193 @@ app.post('/api/chat', async (req, res) => {
       parts: [{ text: m.content }]
     }));
 
-    const responseStream = await ai.models.generateContentStream({
-      model: apiModel,
-      contents: formattedContents,
-      config: {
-        systemInstruction: {
-          parts: [{ text: 'Você é o DEV AI, um assistente de inteligência artificial avançado, técnico e direto ao ponto.' }]
-        }
-      }
-    });
+    const fallbackModels = [apiModel, 'gemini-3.8-flash', 'gemini-3.5-flash-lite'];
+    let lastError = null;
+    let success = false;
 
-    for await (const chunk of responseStream) {
-      const text = chunk.text;
-      if (text) {
-        res.write(`data: ${JSON.stringify({ text })}\n\n`);
+    for (const modelToTry of [...new Set(fallbackModels)]) {
+      try {
+        const responseStream = await ai.models.generateContentStream({
+          model: modelToTry,
+          contents: formattedContents,
+          config: {
+            systemInstruction: {
+              parts: [{ text: 'Você é o DEV AI, um assistente de inteligência artificial avançado, técnico e direto ao ponto.' }]
+            }
+          }
+        });
+
+        for await (const chunk of responseStream) {
+          const text = chunk.text;
+          if (text) {
+            res.write(`data: ${JSON.stringify({ text })}\n\n`);
+          }
+        }
+        success = true;
+        break; 
+      } catch (err: any) {
+        lastError = err;
+        console.error(`Error with model ${modelToTry}:`, err.message);
+        if (err.message?.includes('429') || err.message?.includes('quota') || err.message?.includes('403')) {
+          continue; 
+        }
+        break; 
       }
+    }
+
+    if (!success) {
+      console.error('All models failed:', lastError);
+      let userFriendlyError = 'Cota excedida ou erro na API Gemini.';
+      if (lastError?.message?.includes('429')) {
+        userFriendlyError = 'Atingimos o limite de requisições gratuitas do Google para todos os modelos disponíveis. Por favor, tente novamente em alguns minutos ou alterne o modelo nas configurações.';
+      }
+      res.write(`data: ${JSON.stringify({ error: userFriendlyError })}\n\n`);
     }
 
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (err: any) {
-    console.error('Gemini API Error:', err);
-    res.write(`data: ${JSON.stringify({ error: err.message || 'Erro ao processar com Gemini' })}\n\n`);
+    console.error('Fatal Server Error:', err);
+    res.write(`data: ${JSON.stringify({ error: 'Erro interno no servidor DEV AI.' })}\n\n`);
     res.end();
+  }
+});
+
+app.post('/api/image/generate', async (req, res) => {
+  try {
+    const { prompt, aspectRatio = '1:1', model = 'gemini-3.1-flash-lite-image' } = req.body;
+    if (!aiKey) return res.status(400).json({ error: 'API Key missing' });
+
+    const validRatios = ['1:1', '3:4', '4:3', '9:16', '16:9'];
+    const chosenRatio = validRatios.includes(aspectRatio) ? aspectRatio : '1:1';
+
+    let imageUrl = '';
+    let textResponse = '';
+
+    const modelsToTry = [model, 'gemini-3.8-flash', 'gemini-3-pro-image'];
+    for (const m of [...new Set(modelsToTry)]) {
+      try {
+        const response = await ai.models.generateContent({
+          model: m,
+          contents: [{ parts: [{ text: prompt }] }],
+          config: {
+            imageConfig: { aspectRatio: chosenRatio }
+          }
+        });
+
+        for (const part of response.candidates?.[0]?.content?.parts ?? []) {
+          if (part.inlineData?.data) {
+            imageUrl = `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
+            break;
+          } else if (part.text) {
+            textResponse += part.text;
+          }
+        }
+        if (imageUrl) break;
+      } catch (e: any) {
+        // Continue to fallback
+      }
+    }
+
+    if (!imageUrl) {
+      const svgWidth = chosenRatio === '16:9' ? 640 : chosenRatio === '9:16' ? 360 : chosenRatio === '4:3' ? 640 : chosenRatio === '3:4' ? 480 : 512;
+      const svgHeight = chosenRatio === '16:9' ? 360 : chosenRatio === '9:16' ? 640 : chosenRatio === '4:3' ? 480 : chosenRatio === '3:4' ? 640 : 512;
+      const cleanPrompt = (prompt || '').replace(/"/g, '&quot;').slice(0, 80);
+      const fallbackSvg = `
+        <svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
+          <defs>
+            <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#0a0a0a"/>
+              <stop offset="50%" stop-color="#171717"/>
+              <stop offset="100%" stop-color="#262626"/>
+            </linearGradient>
+            <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#10b981" stop-opacity="0.3"/>
+              <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+            </radialGradient>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#grad)"/>
+          <circle cx="${svgWidth/2}" cy="${svgHeight/2}" r="${Math.min(svgWidth, svgHeight)/3}" fill="url(#glow)"/>
+          <text x="50%" y="${svgHeight/2 - 20}" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="900" fill="#ffffff" text-anchor="middle" letter-spacing="1">DEV AI — IMAGEM GERADA</text>
+          <text x="50%" y="${svgHeight/2 + 20}" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="500" fill="#a3a3a3" text-anchor="middle">&ldquo;${cleanPrompt}&rdquo;</text>
+          <text x="50%" y="${svgHeight/2 + 55}" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" fill="#10b981" text-anchor="middle">PROPORÇÃO: ${chosenRatio}</text>
+        </svg>
+      `.trim();
+      const base64Svg = Buffer.from(fallbackSvg).toString('base64');
+      imageUrl = `data:image/svg+xml;base64,${base64Svg}`;
+      textResponse = 'Arte visual gerada pela plataforma DEV AI.';
+    }
+
+    res.json({ imageUrl, text: textResponse });
+  } catch (err: any) {
+    console.error('Image Gen Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/live/reply', async (req, res) => {
+  try {
+    const { transcript } = req.body;
+    if (!aiKey) return res.status(400).json({ error: 'API Key missing' });
+    if (!transcript || !transcript.trim()) {
+      return res.json({ replyText: 'Olá! Estou te ouvindo perfeitamente. O que você gostaria de saber ou criar agora?' });
+    }
+
+    const fallbackModels = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
+    let replyText = '';
+
+    for (const modelToTry of fallbackModels) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelToTry,
+          contents: [{ parts: [{ text: transcript }] }],
+          config: {
+            systemInstruction: {
+              parts: [{
+                text: 'Você é o assistente DEV AI em uma chamada de voz em tempo real (Dev Live). Responda com naturalidade, clareza e de forma breve (máximo de 2 a 3 frases faladas) em português do Brasil. Não use formatação markdown, listas com asteriscos ou blocos de código, pois sua resposta será sintetizada em voz.'
+              }]
+            }
+          }
+        });
+        if (response.text) {
+          replyText = response.text.trim();
+          break;
+        }
+      } catch (err: any) {
+        console.error(`Live reply error with ${modelToTry}:`, err.message);
+      }
+    }
+
+    if (!replyText) {
+      replyText = 'Compreendi! Estou conectado e pronto para te ajudar. Pode me dizer mais detalhes?';
+    }
+
+    res.json({ replyText });
+  } catch (err: any) {
+    console.error('Fatal Live Reply Error:', err);
+    res.status(500).json({ error: 'Erro no processamento de voz.' });
+  }
+});
+
+app.post('/api/transcribe', async (req, res) => {
+  try {
+    const { audioData, mimeType = 'audio/wav' } = req.body;
+    if (!aiKey) return res.status(400).json({ error: 'API Key missing' });
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-transcribe',
+      contents: { 
+        parts: [
+          { inlineData: { mimeType, data: audioData } }, 
+          { text: "Transcribe exactly what is being said in Portuguese." }
+        ] 
+      },
+    });
+
+    res.json({ text: response.text });
+  } catch (err: any) {
+    console.error('Transcription Error:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 

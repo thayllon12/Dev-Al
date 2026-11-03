@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, createContext, useContext } from 'react';
+import { createPortal } from 'react-dom';
 import {
   MessageSquare, Plus, Trash2, Edit3, Search, Settings, PanelLeft,
   Send, Paperclip, Mic, Image, Copy, CheckCheck, RefreshCw, Sun, Moon, Monitor, Code,
@@ -6,7 +7,8 @@ import {
   Terminal, Zap, Shield, Info, Cpu, Volume2, VolumeX, MoreVertical, Share2,
   FileText, Video, Music, Camera, File, CheckCircle2, UserPlus, Users, Lock, Eye, Edit2,
   Square, ArrowUpRight, RotateCcw, Sliders, HardDrive, AlertTriangle, EyeOff, Radio,
-  PhoneCall, PhoneOff, MonitorUp, LogIn, LogOut, Check
+  PhoneCall, PhoneOff, MonitorUp, LogIn, LogOut, Check, Palette, UserCheck,
+  ZapOff, ChevronDown
 } from 'lucide-react';
 import { CodeBlock } from './components/CodeBlock';
 import { HtmlPreviewModal } from './components/HtmlPreviewModal';
@@ -82,7 +84,7 @@ class RealAIProvider {
                 onChunk(parsed.text);
               }
               if (parsed.error) {
-                onChunk(`\n\n*[Erro da API: ${parsed.error}]*`);
+                onChunk(`\n\n> **⚠️ Aviso do Sistema:** ${parsed.error}`);
               }
             } catch (e) {
               // Ignore
@@ -94,9 +96,7 @@ class RealAIProvider {
       if (e.name === 'AbortError' || e.message === 'Aborted') {
         onChunk('\n\n*[Geração interrompida pelo usuário]*');
       } else {
-        onChunk('\n\n*[Erro de rede ou cota excedida. Usando modo de contingência DEV AI]*');
-        await new Promise(r => setTimeout(r, 400));
-        onChunk(' Olá! O DEV AI respondeu com sucesso através do modelo Gemini 3.8 Flash.');
+        onChunk('\n\n> **🔴 Erro Crítico:** Não foi possível estabelecer conexão com o servidor ou os limites de cota foram excedidos. \n\n*Iniciando modo de resposta local de emergência:* \n\nOlá! Parece que estou enfrentando uma alta demanda no momento. Por favor, tente novamente em alguns instantes ou verifique sua conexão.');
       }
     } finally {
       this.abortController = null;
@@ -117,7 +117,7 @@ const DEFAULT_SETTINGS = {
   selectedModel: 'gemini-3.8-flash',
   reasoningMode: 'Médio',
   searchWebEnabled: true,
-  userName: 'TIKTOKMONEY',
+  userName: 'Usuário',
   personalityPrompt: 'Alegre, prestativo e direto ao ponto.',
   personalityPreset: 'ALEGRE',
   defaultMode: 'DEV AI',
@@ -131,17 +131,10 @@ const DEFAULT_SETTINGS = {
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [currentUser, setCurrentUser] = useState<any>(null);
-  const [chats, setChats] = useState(() => {
+  const [chats, setChats] = useState<any[]>(() => {
     try {
       const saved = localStorage.getItem('DEV_AI_CHATS_V6_FIREBASE');
-      return saved ? JSON.parse(saved) : [
-        {
-          id: 'chat_default',
-          title: 'Nova Conversa',
-          createdAt: new Date().toISOString(),
-          messages: []
-        }
-      ];
+      return saved ? JSON.parse(saved) : [];
     } catch {
       return [];
     }
@@ -156,11 +149,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   });
 
-  const [activeChatId, setActiveChatId] = useState('chat_default');
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  
+  // Theme state initialized from localStorage for zero-flicker (partially)
   const [settings, setSettings] = useState(() => {
     try {
       const saved = localStorage.getItem('DEV_AI_SETTINGS_V6');
-      return saved ? { ...DEFAULT_SETTINGS, ...JSON.parse(saved) } : DEFAULT_SETTINGS;
+      const parsed = saved ? JSON.parse(saved) : {};
+      return { ...DEFAULT_SETTINGS, ...parsed };
     } catch {
       return DEFAULT_SETTINGS;
     }
@@ -173,64 +169,176 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [expandedEditorOpen, setExpandedEditorOpen] = useState(false);
   const [geminiLiveOpen, setGeminiLiveOpen] = useState(false);
   const [cameraModalOpen, setCameraModalOpen] = useState(false);
+  const [imageGenModalOpen, setImageGenModalOpen] = useState(false);
   const [renameModalData, setRenameModalData] = useState<any>(null);
+
+  const [myUserId] = useState<string>(() => {
+    let saved = localStorage.getItem('DEV_AI_MY_USER_ID_V7');
+    if (!saved) {
+      saved = 'user_' + Math.random().toString(36).substring(2, 8);
+      localStorage.setItem('DEV_AI_MY_USER_ID_V7', saved);
+    }
+    return saved;
+  });
+  const effectiveUserId = currentUser?.uid || myUserId;
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationTime, setGenerationTime] = useState(0);
   const [generationState, setGenerationState] = useState('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [previewHtmlCode, setPreviewHtmlCode] = useState<string | null>(null);
-  const [onlineCount, setOnlineCount] = useState(14);
+  const [textSelectionData, setTextSelectionData] = useState<string | null>(null);
+  const [onlineCount, setOnlineCount] = useState(1);
 
-  // Auth listener & Firestore sync
+  // Auto-sync shared chats with my user ID
+  useEffect(() => {
+    const inboxKey = `DEV_AI_SHARED_INBOX_${effectiveUserId}`;
+    try {
+      const savedShared = localStorage.getItem(inboxKey);
+      if (savedShared) {
+        const parsed = JSON.parse(savedShared);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setChats(prev => {
+            const map = new Map();
+            prev.forEach(c => map.set(c.id, c));
+            parsed.forEach((sc: any) => {
+              if (!map.has(sc.id)) {
+                map.set(sc.id, sc);
+              }
+            });
+            return Array.from(map.values());
+          });
+        }
+      }
+    } catch (e) {
+      console.error('Error syncing shared chats:', e);
+    }
+  }, [effectiveUserId]);
+
+  // Apply theme immediately
+  useEffect(() => {
+    const applyTheme = () => {
+      const root = document.documentElement;
+      const isDark = settings.theme === 'escuro' || (settings.theme === 'sistema' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      
+      if (isDark) {
+        root.classList.add('dark');
+        root.style.colorScheme = 'dark';
+      } else {
+        root.classList.remove('dark');
+        root.style.colorScheme = 'light';
+      }
+    };
+
+    applyTheme();
+
+    // Listen for system theme changes
+    if (settings.theme === 'sistema') {
+      const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+      const listener = () => applyTheme();
+      mediaQuery.addEventListener('change', listener);
+      return () => mediaQuery.removeEventListener('change', listener);
+    }
+  }, [settings.theme]);
+
+  // Auth & Data Load
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
       if (user) {
-        // Load chats from Firestore
         try {
-          const userDocRef = doc(db, 'users', user.uid, 'data', 'chats');
-          const docSnap = await getDoc(userDocRef);
-          if (docSnap.exists()) {
-            const cloudChats = docSnap.data().chats;
-            if (cloudChats && cloudChats.length > 0) {
-              setChats(cloudChats);
+          // Load User Profile (Settings)
+          const userRef = doc(db, 'users', user.uid);
+          const userSnap = await getDoc(userRef);
+          if (userSnap.exists()) {
+            const userData = userSnap.data();
+            if (userData.settings) {
+              setSettings((prev: any) => ({ ...prev, ...userData.settings }));
             }
           }
+
+          // Load Chats
+          const chatsRef = doc(db, 'users', user.uid, 'data', 'chats');
+          const chatsSnap = await getDoc(chatsRef);
+          if (chatsSnap.exists()) {
+            const cloudChats = chatsSnap.data().chats;
+            if (cloudChats && cloudChats.length > 0) {
+              setChats(cloudChats);
+              if (!activeChatId) setActiveChatId(cloudChats[0].id);
+            }
+          }
+
+          // Online Presence (Real)
+          const presenceRef = doc(db, 'presence', user.uid);
+          await setDoc(presenceRef, { 
+            lastSeen: new Date().toISOString(),
+            email: user.email 
+          }, { merge: true });
+
+          // Periodic Presence Update
+          const interval = setInterval(async () => {
+            await setDoc(presenceRef, { lastSeen: new Date().toISOString() }, { merge: true });
+          }, 60000); // Every 1 min
+
+          return () => clearInterval(interval);
         } catch (e) {
-          console.error('Erro ao carregar do Firestore:', e);
+          console.error('Error loading data:', e);
+        }
+      } else {
+        // Default chat for guests
+        if (chats.length === 0) {
+          const id = 'chat_guest_' + Date.now();
+          setChats([{ id, title: 'Nova Conversa', messages: [], createdAt: new Date().toISOString() }]);
+          setActiveChatId(id);
+        } else if (!activeChatId) {
+          setActiveChatId(chats[0].id);
         }
       }
     });
     return () => unsubscribe();
   }, []);
 
-  // Sync to Firestore when chats change and user is logged in
+  // Sync Settings to Cloud/Local
   useEffect(() => {
-    try {
-      localStorage.setItem('DEV_AI_CHATS_V6_FIREBASE', JSON.stringify(chats));
-      if (currentUser) {
-        const userDocRef = doc(db, 'users', currentUser.uid, 'data', 'chats');
-        setDoc(userDocRef, { chats }, { merge: true }).catch(err => console.error(err));
-      }
-    } catch (e) { console.error(e); }
+    localStorage.setItem('DEV_AI_SETTINGS_V6', JSON.stringify(settings));
+    if (currentUser) {
+      const userRef = doc(db, 'users', currentUser.uid);
+      setDoc(userRef, { settings }, { merge: true }).catch(e => console.error(e));
+    }
+  }, [settings, currentUser]);
+
+  // Sync Chats to Local
+  useEffect(() => {
+    localStorage.setItem('DEV_AI_CHATS_V6_FIREBASE', JSON.stringify(chats));
+    if (currentUser) {
+      const chatsRef = doc(db, 'users', currentUser.uid, 'data', 'chats');
+      setDoc(chatsRef, { chats }, { merge: true }).catch(e => console.error(e));
+    }
   }, [chats, currentUser]);
 
-  // Theme synchronization
+  // Global Online Counter (Real-ish simulation based on recent presence)
   useEffect(() => {
-    const root = document.documentElement;
-    root.classList.remove('dark', 'light', 'darker', 'dev-rgb');
+    const fetchOnlineCount = async () => {
+      try {
+        // This is a simple version. In a real app, you'd use a cloud function or a count query.
+        // For now, we'll fetch a sample or just use a dynamic realistic number if we don't want to query all users.
+        const q = collection(db, 'presence');
+        const snap = await getDocs(q);
+        const now = new Date().getTime();
+        const active = snap.docs.filter(d => {
+          const lastSeen = new Date(d.data().lastSeen).getTime();
+          return (now - lastSeen) < 300000; // 5 minutes
+        }).length;
+        setOnlineCount(Math.max(active, 1));
+      } catch (e) {
+        console.error('Error fetching online count:', e);
+      }
+    };
 
-    if (settings.theme === 'claro') {
-      root.classList.add('light');
-    } else if (settings.theme === 'escuro') {
-      root.classList.add('dark');
-    } else {
-      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-      if (prefersDark) root.classList.add('dark');
-      else root.classList.add('light');
-    }
-  }, [settings.theme]);
+    fetchOnlineCount();
+    const interval = setInterval(fetchOnlineCount, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Generation Timer
   useEffect(() => {
@@ -244,9 +352,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return () => clearInterval(timer);
   }, [isGenerating]);
 
-  const showToast = (text: string) => {
-    setToastMessage(text);
-    setTimeout(() => setToastMessage(null), 3000);
+  const showToast = (_text: string) => {
+    // User requested to completely remove notifications from the app
   };
 
   const loginWithGoogle = async () => {
@@ -268,15 +375,85 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const createNewChat = () => {
+    const newChatId = 'chat_' + Date.now();
     const newChat = {
-      id: 'chat_' + Date.now(),
+      id: newChatId,
       title: 'Nova Conversa',
       createdAt: new Date().toISOString(),
-      messages: []
+      messages: [],
+      ownerId: effectiveUserId,
+      myRole: 'admin',
+      isShared: false,
+      sharedUsers: []
     };
     setChats((prev: any) => [newChat, ...prev]);
     setActiveChatId(newChat.id);
     return newChat.id;
+  };
+
+  const shareChatWithUser = (chatId: string, targetId: string, role: 'viewer' | 'editor' | 'admin') => {
+    const chat = chats.find(c => c.id === chatId);
+    if (!chat) return false;
+
+    const existingUsers = Array.isArray(chat.sharedUsers) ? [...chat.sharedUsers] : [];
+    const idx = existingUsers.findIndex(u => u.userId === targetId.trim());
+    if (idx >= 0) {
+      existingUsers[idx].role = role;
+    } else {
+      existingUsers.push({ userId: targetId.trim(), role, addedAt: new Date().toISOString() });
+    }
+
+    const updatedChat = {
+      ...chat,
+      isShared: true,
+      sharedUsers: existingUsers
+    };
+
+    setChats(prev => prev.map(c => c.id === chatId ? updatedChat : c));
+
+    // Save into target user's shared inbox
+    try {
+      const targetInboxKey = `DEV_AI_SHARED_INBOX_${targetId.trim()}`;
+      const targetInbox = JSON.parse(localStorage.getItem(targetInboxKey) || '[]');
+      const filtered = targetInbox.filter((c: any) => c.id !== chatId);
+      filtered.unshift({
+        ...updatedChat,
+        isShared: true,
+        myRole: role,
+        sharedBy: currentUser?.displayName || effectiveUserId
+      });
+      localStorage.setItem(targetInboxKey, JSON.stringify(filtered));
+    } catch (e) {
+      console.error(e);
+    }
+
+    return true;
+  };
+
+  const updateSharedUserRole = (chatId: string, targetId: string, newRole: 'viewer' | 'editor' | 'admin') => {
+    return shareChatWithUser(chatId, targetId, newRole);
+  };
+
+  const removeSharedUser = (chatId: string, targetId: string) => {
+    setChats(prev => prev.map(c => {
+      if (c.id === chatId) {
+        const remaining = (c.sharedUsers || []).filter((u: any) => u.userId !== targetId);
+        return {
+          ...c,
+          sharedUsers: remaining,
+          isShared: remaining.length > 0
+        };
+      }
+      return c;
+    }));
+    try {
+      const targetInboxKey = `DEV_AI_SHARED_INBOX_${targetId}`;
+      const targetInbox = JSON.parse(localStorage.getItem(targetInboxKey) || '[]');
+      const filtered = targetInbox.filter((c: any) => c.id !== chatId);
+      localStorage.setItem(targetInboxKey, JSON.stringify(filtered));
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   const moveToTrash = (chatId: string) => {
@@ -319,20 +496,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const activeChat = useMemo(() => {
-    return chats.find((c: any) => c.id === activeChatId) || null;
+    return chats.find((c: any) => c.id === (activeChatId || '')) || null;
   }, [chats, activeChatId]);
 
   return (
     <AppContext.Provider value={{
-      currentUser, loginWithGoogle, logout,
+      currentUser, loginWithGoogle, logout, myUserId: effectiveUserId,
       chats, setChats, trashedChats, activeChatId, setActiveChatId, activeChat, createNewChat,
       moveToTrash, restoreFromTrash, permanentlyDelete, emptyTrash, renameChat, settings, setSettings,
       sidebarOpen, setSidebarOpen, settingsOpen, setSettingsOpen, shareModalOpen, setShareModalOpen,
       modelSelectorOpen, setModelSelectorOpen, expandedEditorOpen, setExpandedEditorOpen,
       geminiLiveOpen, setGeminiLiveOpen, cameraModalOpen, setCameraModalOpen,
+      imageGenModalOpen, setImageGenModalOpen,
       renameModalData, setRenameModalData, isGenerating, setIsGenerating,
       generationTime, generationState, setGenerationState, showToast, toastMessage,
-      previewHtmlCode, setPreviewHtmlCode, onlineCount
+      previewHtmlCode, setPreviewHtmlCode, onlineCount,
+      textSelectionData, setTextSelectionData,
+      shareChatWithUser, updateSharedUserRole, removeSharedUser
     }}>
       {children}
     </AppContext.Provider>
@@ -340,6 +520,86 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 }
 
 const useApp = () => useContext(AppContext);
+
+// ==========================================
+// UTILITY COMPONENTS
+// ==========================================
+
+function PortalMenu({ isOpen, onClose, triggerRef, children }: { isOpen: boolean; onClose: () => void; triggerRef: React.RefObject<HTMLElement | null>; children: React.ReactNode }) {
+  const [coords, setCoords] = useState({ top: 0, left: 0, translateY: '4px' });
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (isOpen && triggerRef.current) {
+      const rect = triggerRef.current.getBoundingClientRect();
+      const menuWidth = 200;
+      const menuHeight = 220;
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      
+      let left = rect.right;
+      if (left > viewportWidth - 8) {
+        left = viewportWidth - 8;
+      }
+      if (left < menuWidth + 8) {
+        left = menuWidth + 8;
+      }
+
+      // Check vertical space: if not enough space below, open UPWARDS!
+      let top = rect.bottom;
+      let translateY = '4px';
+      if (rect.bottom + menuHeight > viewportHeight - 16) {
+        top = rect.top;
+        translateY = 'calc(-100% - 4px)';
+      }
+
+      setCoords({
+        top,
+        left,
+        translateY
+      });
+    }
+  }, [isOpen, triggerRef]);
+
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node) && triggerRef.current && !triggerRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+
+    if (isOpen) {
+      document.addEventListener('mousedown', handleOutsideClick);
+      document.addEventListener('keydown', handleEscape);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [isOpen, onClose, triggerRef]);
+
+  if (!isOpen) return null;
+
+  return createPortal(
+    <div 
+      ref={menuRef}
+      className="fixed z-[50000] animate-in zoom-in-95 fade-in duration-200"
+      style={{ 
+        top: `${coords.top}px`, 
+        left: `${coords.left}px`,
+        transform: `translateX(-100%) translateY(${coords.translateY})`
+      }}
+    >
+      <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-2xl shadow-2xl overflow-hidden py-1.5 w-52">
+        {children}
+      </div>
+    </div>,
+    document.body
+  );
+}
 
 // ==========================================
 // MARKDOWN RENDERER
@@ -381,22 +641,22 @@ function MarkdownRenderer({ content, chatId, userSettings, isGenerating }: { con
     }
 
     if (line.startsWith('### ')) {
-      elements.push(<h3 key={idx} className="text-base md:text-lg font-bold text-neutral-100 my-2">{line.replace('### ', '')}</h3>);
+      elements.push(<h3 key={idx} className="text-base md:text-lg font-bold text-neutral-900 dark:text-neutral-100 my-2">{line.replace('### ', '')}</h3>);
       return;
     }
     if (line.startsWith('## ')) {
-      elements.push(<h2 key={idx} className="text-lg md:text-xl font-bold text-neutral-100 my-3">{line.replace('## ', '')}</h2>);
+      elements.push(<h2 key={idx} className="text-lg md:text-xl font-bold text-neutral-900 dark:text-neutral-100 my-3">{line.replace('## ', '')}</h2>);
       return;
     }
     if (line.startsWith('# ')) {
-      elements.push(<h1 key={idx} className="text-xl md:text-2xl font-extrabold text-neutral-100 my-4">{line.replace('# ', '')}</h1>);
+      elements.push(<h1 key={idx} className="text-xl md:text-2xl font-extrabold text-neutral-900 dark:text-neutral-100 my-4">{line.replace('# ', '')}</h1>);
       return;
     }
 
     if (line.trim().startsWith('- ') || line.trim().startsWith('1. ')) {
       const itemText = line.replace(/^(\d+\.|\-)\s+/, '');
       elements.push(
-        <li key={idx} className="ml-4 list-disc text-neutral-300 my-1">
+        <li key={idx} className="ml-4 list-disc text-neutral-700 dark:text-neutral-300 my-1">
           {inlineFormatting(itemText)}
         </li>
       );
@@ -405,7 +665,7 @@ function MarkdownRenderer({ content, chatId, userSettings, isGenerating }: { con
 
     if (line.trim() !== '') {
       elements.push(
-        <p key={idx} className="text-neutral-200 leading-relaxed my-2 break-words">
+        <p key={idx} className="text-neutral-800 dark:text-neutral-200 leading-relaxed my-2 break-words">
           {inlineFormatting(line)}
         </p>
       );
@@ -416,13 +676,13 @@ function MarkdownRenderer({ content, chatId, userSettings, isGenerating }: { con
     const parts = text.split(/(\*\*.*?\*\*|\*.*?\*|`.*?`)/g);
     return parts.map((part, i) => {
       if (part.startsWith('**') && part.endsWith('**')) {
-        return <strong key={i} className="font-semibold text-neutral-100">{part.slice(2, -2)}</strong>;
+        return <strong key={i} className="font-semibold text-neutral-900 dark:text-neutral-100">{part.slice(2, -2)}</strong>;
       }
       if (part.startsWith('*') && part.endsWith('*')) {
-        return <em key={i} className="italic text-neutral-300">{part.slice(1, -1)}</em>;
+        return <em key={i} className="italic text-neutral-700 dark:text-neutral-300">{part.slice(1, -1)}</em>;
       }
       if (part.startsWith('`') && part.endsWith('`')) {
-        return <code key={i} className="bg-neutral-800/80 text-neutral-200 px-1.5 py-0.5 rounded text-xs font-mono border border-neutral-700/60">{part.slice(1, -1)}</code>;
+        return <code key={i} className="bg-neutral-200 dark:bg-neutral-800/80 text-neutral-800 dark:text-neutral-200 px-1.5 py-0.5 rounded text-xs font-mono border border-neutral-300 dark:border-neutral-700/60">{part.slice(1, -1)}</code>;
       }
       return part;
     });
@@ -435,15 +695,347 @@ function MarkdownRenderer({ content, chatId, userSettings, isGenerating }: { con
 // SIDEBAR (USING OFFICIAL LOGO)
 // ==========================================
 
+function SidebarChatItem({ chat, activeChatId, setActiveChatId, setSidebarOpen, setRenameModalData, moveToTrash, showToast }: { 
+  chat: any; 
+  activeChatId: string | null; 
+  setActiveChatId: (id: string) => void; 
+  setSidebarOpen: (o: boolean) => void;
+  setRenameModalData: (d: any) => void;
+  moveToTrash: (id: string) => void;
+  showToast: (m: string) => void;
+}) {
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const menuBtnRef = useRef<HTMLButtonElement>(null);
+  const longPressTimer = useRef<any>(null);
+  const isActive = chat.id === activeChatId;
+
+  const handleTouchStart = () => {
+    longPressTimer.current = setTimeout(() => {
+      setIsMenuOpen(true);
+    }, 600);
+  };
+
+  const handleTouchEnd = () => {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+  };
+
+  const isShared = Boolean(chat.isShared || (chat.sharedUsers && chat.sharedUsers.length > 0) || chat.myRole);
+  const roleLabel = chat.myRole === 'viewer' ? 'Somente ver' : chat.myRole === 'editor' ? 'Editor' : 'Admin';
+
+  return (
+    <div
+      ref={triggerRef}
+      onClick={() => {
+        setActiveChatId(chat.id);
+        if (window.innerWidth < 768) setSidebarOpen(false);
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setIsMenuOpen(true);
+      }}
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
+      onMouseDown={handleTouchStart}
+      onMouseUp={handleTouchEnd}
+      className={`group relative flex items-center justify-between px-3 py-2 rounded-xl text-xs cursor-pointer transition-all select-none ${
+        isActive
+          ? 'bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800/80 text-neutral-900 dark:text-neutral-100 font-medium'
+          : 'text-neutral-500 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-900/50 hover:text-neutral-700 dark:hover:text-neutral-200'
+      }`}
+    >
+      <div className="flex items-center min-w-0 flex-1 pr-2">
+        {/* Personagenzinho Verde mostrando que aquele chat é compartilhado */}
+        {isShared && (
+          <div 
+            className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-500 border border-emerald-500/40 flex items-center justify-center shrink-0 mr-2 shadow-xs"
+            title={`Chat compartilhado (${roleLabel})`}
+          >
+            <UserCheck className="w-3 h-3 text-emerald-500" />
+          </div>
+        )}
+        <span className="truncate flex-1">{chat.title}</span>
+      </div>
+
+      <div className="relative">
+        <button
+          ref={menuBtnRef}
+          onClick={(e) => {
+            e.stopPropagation();
+            setIsMenuOpen(!isMenuOpen);
+          }}
+          className="p-1 md:opacity-0 md:group-hover:opacity-100 hover:bg-neutral-200 dark:hover:bg-neutral-800 text-neutral-400 rounded-lg transition-opacity"
+        >
+          <MoreVertical className="w-3.5 h-3.5" />
+        </button>
+
+        <PortalMenu 
+          isOpen={isMenuOpen} 
+          onClose={() => setIsMenuOpen(false)} 
+          triggerRef={menuBtnRef}
+        >
+          {isShared ? (
+            <div className="px-3 py-1.5 text-[10px] font-bold text-emerald-500 uppercase border-b border-neutral-100 dark:border-neutral-800 flex items-center justify-between">
+              <span>Compartilhado</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 font-bold">{roleLabel}</span>
+            </div>
+          ) : (
+            <div className="px-3 py-1.5 text-[10px] font-bold text-neutral-400 uppercase border-b border-neutral-100 dark:border-neutral-800">
+              Opções
+            </div>
+          )}
+
+          {isShared && chat.myRole !== 'viewer' && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setActiveChatId(chat.id);
+                setIsMenuOpen(false);
+                if (window.innerWidth < 768) setSidebarOpen(false);
+              }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+            >
+              <Edit2 className="w-3.5 h-3.5 text-emerald-500" />
+              <span>Escrever mensagem</span>
+            </button>
+          )}
+
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setRenameModalData({ id: chat.id, title: chat.title });
+              setIsMenuOpen(false);
+            }}
+            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+          >
+            <Edit3 className="w-3.5 h-3.5" />
+            <span>Renomear</span>
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              showToast('Conversa fixada no topo');
+              setIsMenuOpen(false);
+            }}
+            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+          >
+            <Paperclip className="w-3.5 h-3.5" />
+            <span>Fixar Conversa</span>
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              moveToTrash(chat.id);
+              setIsMenuOpen(false);
+            }}
+            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-600 dark:text-red-400 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span>Excluir</span>
+          </button>
+        </PortalMenu>
+      </div>
+    </div>
+  );
+}
+
+function ChatMessageItem({ 
+  msg, index, chatId, userSettings, isGenerating, onRegenerate, onEditUserMessage, handleTTS, handleCopy, handleDownloadResponse, speakingIndex 
+}: {
+  msg: any;
+  index: number;
+  chatId: string | null;
+  userSettings: any;
+  isGenerating: boolean;
+  onRegenerate: () => void;
+  onEditUserMessage: (t: string, i: number) => void;
+  handleTTS: (i: number, t: string) => void;
+  handleCopy: (t: string) => void;
+  handleDownloadResponse: (t: string) => void;
+  speakingIndex: number | null;
+}) {
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const { setTextSelectionData } = useApp();
+  const isUser = msg.role === 'user';
+
+  const messageTime = useMemo(() => {
+    try {
+      const d = msg.timestamp ? new Date(msg.timestamp) : new Date();
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return '';
+    }
+  }, [msg.timestamp]);
+
+  return (
+    <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} space-y-1 group relative`}>
+      {isUser ? (
+        <>
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded-full bg-purple-600 text-white flex items-center justify-center font-bold text-[11px] shadow-xs">
+              {userSettings.userName.charAt(0)}
+            </div>
+          </div>
+          <span className="text-[11px] font-bold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider pr-1">
+            {userSettings.userName}
+          </span>
+          <div className="relative group/bubble bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-neutral-900 dark:text-neutral-100 rounded-2xl px-4 py-2.5 text-sm max-w-[85%] shadow-xs">
+            {msg.content}
+          </div>
+          <div className="flex items-center gap-1 pt-1 opacity-80 group-hover:opacity-100 transition-opacity">
+            <button
+              onClick={() => handleCopy(msg.content)}
+              className="p-1 text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-900 transition-colors"
+              title="Copiar mensagem"
+            >
+              <Copy className="w-3.5 h-3.5" />
+            </button>
+            <button
+              ref={triggerRef}
+              onClick={() => setIsMenuOpen(!isMenuOpen)}
+              className="p-1 text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-900 transition-colors"
+              title="Mais opções"
+            >
+              <MoreVertical className="w-3.5 h-3.5" />
+            </button>
+
+            <PortalMenu 
+              isOpen={isMenuOpen} 
+              onClose={() => setIsMenuOpen(false)} 
+              triggerRef={triggerRef}
+            >
+              <div className="px-3 py-1.5 text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 border-b border-neutral-100 dark:border-neutral-800 flex items-center justify-between">
+                <span>{messageTime}</span>
+              </div>
+              <button
+                onClick={() => { handleCopy(msg.content); setIsMenuOpen(false); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copiar mensagem</span>
+              </button>
+              <button
+                onClick={() => { setTextSelectionData(msg.content); setIsMenuOpen(false); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>Selecionar texto</span>
+              </button>
+              <button
+                onClick={() => { onEditUserMessage(msg.content, index); setIsMenuOpen(false); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+              >
+                <Edit2 className="w-3.5 h-3.5" />
+                <span>Editar mensagem</span>
+              </button>
+            </PortalMenu>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded-lg bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center border border-neutral-200 dark:border-neutral-700 shadow-xs overflow-hidden">
+                <img src="/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="AI" className="w-full h-full object-cover" />
+            </div>
+            <span className="text-[11px] font-bold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">DEV AI</span>
+          </div>
+          <div className="text-neutral-800 dark:text-neutral-200 text-sm md:text-base leading-relaxed pl-1 w-full max-w-full overflow-x-hidden">
+            <MarkdownRenderer content={msg.content} chatId={chatId} userSettings={userSettings} isGenerating={isGenerating} />
+          </div>
+          <div className="flex items-center gap-1 mt-2 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+             <button
+               onClick={() => handleTTS(index, msg.content)}
+               className={`p-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 transition-colors ${speakingIndex === index ? 'bg-emerald-500 text-white border-emerald-500 shadow-lg' : 'text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900'}`}
+               title="Ouvir resposta"
+             >
+               <Volume2 className="w-4 h-4" />
+             </button>
+             <button
+               onClick={() => handleCopy(msg.content)}
+               className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 transition-colors"
+               title="Copiar resposta"
+             >
+               <Copy className="w-4 h-4" />
+             </button>
+             <button
+               onClick={() => onRegenerate && onRegenerate()}
+               className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 transition-colors"
+               title="Regenerar resposta"
+             >
+               <RefreshCw className="w-4 h-4" />
+             </button>
+
+             <div className="relative">
+               <button
+                 ref={triggerRef}
+                 onClick={() => setIsMenuOpen(!isMenuOpen)}
+                 className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 transition-colors bg-white dark:bg-neutral-900"
+                 title="Opções da resposta"
+               >
+                 <MoreVertical className="w-4 h-4" />
+               </button>
+
+               <PortalMenu 
+                isOpen={isMenuOpen} 
+                onClose={() => setIsMenuOpen(false)} 
+                triggerRef={triggerRef}
+               >
+                  <div className="px-3 py-1.5 text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 border-b border-neutral-100 dark:border-neutral-800 flex items-center justify-between">
+                    <span>{messageTime}</span>
+                  </div>
+                  <button
+                    onClick={() => { handleCopy(msg.content); setIsMenuOpen(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copiar resposta</span>
+                  </button>
+                  <button
+                    onClick={() => { setTextSelectionData(msg.content); setIsMenuOpen(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>Selecionar texto</span>
+                  </button>
+                  <button
+                    onClick={() => { handleTTS(index, msg.content); setIsMenuOpen(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                  >
+                    <Volume2 className="w-3.5 h-3.5" />
+                    <span>Ouvir resposta</span>
+                  </button>
+                  <button
+                    onClick={() => { handleDownloadResponse(msg.content); setIsMenuOpen(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Baixar resposta (.md)</span>
+                  </button>
+                  <button
+                    onClick={() => { onRegenerate && onRegenerate(); setIsMenuOpen(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Regenerar resposta</span>
+                  </button>
+                </PortalMenu>
+             </div>
+           </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function Sidebar() {
   const {
     chats, activeChatId, setActiveChatId, createNewChat, moveToTrash,
     sidebarOpen, setSidebarOpen, setSettingsOpen, setRenameModalData,
-    currentUser, loginWithGoogle, logout
+    currentUser, loginWithGoogle, logout, onlineCount, showToast, myUserId
   } = useApp();
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
 
   const filteredChats = useMemo(() => {
     if (!searchQuery.trim()) return chats;
@@ -460,16 +1052,16 @@ function Sidebar() {
       )}
 
       <aside
-        className={`fixed md:static inset-y-0 left-0 z-50 flex flex-col bg-neutral-950 border-r border-neutral-900 w-72 transform transition-transform duration-300 ease-in-out ${
+        className={`fixed md:static inset-y-0 left-0 z-50 flex flex-col bg-white dark:bg-neutral-950 border-r border-neutral-200 dark:border-neutral-900 w-72 transform transition-transform duration-300 ease-in-out ${
           sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0 md:w-0 md:overflow-hidden md:border-none'
         }`}
       >
-        <div className="flex items-center justify-between p-4 border-b border-neutral-900">
+        <div className="flex items-center justify-between p-4 border-b border-neutral-200 dark:border-neutral-900">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-neutral-900 overflow-hidden border border-neutral-800 shadow-sm flex items-center justify-center">
-              <img src="/public/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="DEV AI Logo" className="w-full h-full object-cover" />
+            <div className="w-8 h-8 rounded-lg bg-neutral-100 dark:bg-neutral-900 overflow-hidden border border-neutral-200 dark:border-neutral-800 shadow-sm flex items-center justify-center">
+              <img src="/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="DEV AI Logo" className="w-full h-full object-cover" />
             </div>
-            <span className="font-bold text-neutral-100 text-sm tracking-wide">DEV AI</span>
+            <span className="font-bold text-neutral-900 dark:text-neutral-100 text-sm tracking-wide">DEV AI</span>
           </div>
 
           <button
@@ -492,7 +1084,7 @@ function Sidebar() {
               placeholder="Pesquisar chats..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-neutral-900 border border-neutral-800/80 rounded-xl pl-8 pr-3 py-1.5 text-xs text-neutral-200 placeholder-neutral-500 focus:outline-none focus:border-neutral-700"
+              className="w-full bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800/80 rounded-xl pl-8 pr-3 py-1.5 text-xs text-neutral-800 dark:text-neutral-200 placeholder-neutral-500 focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-700"
             />
           </div>
         </div>
@@ -502,93 +1094,89 @@ function Sidebar() {
             Histórico
           </div>
 
-          {filteredChats.map((chat: any) => {
-            const isActive = chat.id === activeChatId;
-
-            return (
-              <div
-                key={chat.id}
-                onClick={() => {
-                  setActiveChatId(chat.id);
-                  if (window.innerWidth < 768) setSidebarOpen(false);
-                }}
-                className={`group relative flex items-center justify-between px-3 py-2 rounded-xl text-xs cursor-pointer transition-all ${
-                  isActive
-                    ? 'bg-neutral-900 border border-neutral-800/80 text-neutral-100 font-medium'
-                    : 'text-neutral-400 hover:bg-neutral-900/50 hover:text-neutral-200'
-                }`}
-              >
-                <span className="truncate flex-1 pr-2">{chat.title}</span>
-
-                <div className="relative">
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setMenuOpenId(menuOpenId === chat.id ? null : chat.id);
-                    }}
-                    className="p-1 opacity-0 group-hover:opacity-100 hover:bg-neutral-800 text-neutral-400 rounded-lg transition-opacity"
-                  >
-                    <MoreVertical className="w-3.5 h-3.5" />
-                  </button>
-
-                  {menuOpenId === chat.id && (
-                    <div className="absolute right-0 top-6 w-36 bg-neutral-900 border border-neutral-800 rounded-xl shadow-2xl py-1 z-30 text-xs">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setRenameModalData({ id: chat.id, title: chat.title });
-                          setMenuOpenId(null);
-                        }}
-                        className="w-full flex items-center gap-2 px-3 py-1.5 text-neutral-300 hover:bg-neutral-800"
-                      >
-                        <Edit3 className="w-3.5 h-3.5" />
-                        <span>Renomear</span>
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          moveToTrash(chat.id);
-                          setMenuOpenId(null);
-                        }}
-                        className="w-full flex items-center gap-2 px-3 py-1.5 text-red-400 hover:bg-neutral-800"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>Excluir</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+          {filteredChats.map((chat: any) => (
+            <SidebarChatItem 
+              key={chat.id} 
+              chat={chat} 
+              activeChatId={activeChatId} 
+              setActiveChatId={setActiveChatId} 
+              setSidebarOpen={setSidebarOpen}
+              setRenameModalData={setRenameModalData}
+              moveToTrash={moveToTrash}
+              showToast={showToast}
+            />
+          ))}
         </div>
 
-        <div className="p-3 border-t border-neutral-900 bg-neutral-950 space-y-2">
+        <div className="p-3 border-t border-neutral-200 dark:border-neutral-900 bg-white dark:bg-neutral-950 space-y-2">
           {currentUser ? (
-            <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-800 text-xs">
-              <div className="flex items-center gap-2 truncate pr-2">
-                <img src={currentUser.photoURL || ''} alt="avatar" className="w-6 h-6 rounded-full object-cover" />
-                <span className="truncate text-neutral-200 font-medium">{currentUser.displayName || currentUser.email}</span>
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs">
+                <div className="flex items-center gap-2 truncate pr-2">
+                  <img src={currentUser.photoURL || ''} alt="avatar" className="w-6 h-6 rounded-full object-cover" />
+                  <span className="truncate text-neutral-700 dark:text-neutral-200 font-medium">{currentUser.displayName || currentUser.email}</span>
+                </div>
+                <button onClick={logout} className="p-1 text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-white" title="Sair">
+                  <LogOut className="w-4 h-4" />
+                </button>
               </div>
-              <button onClick={logout} className="p-1 text-neutral-400 hover:text-white" title="Sair">
-                <LogOut className="w-4 h-4" />
-              </button>
+              
+              <div className="px-3 py-1 space-y-1">
+                <div className="flex flex-col gap-0.5">
+                  <div className="flex items-center justify-between text-[10px] text-neutral-500">
+                    <button 
+                      onClick={() => {
+                        navigator.clipboard.writeText(currentUser.uid);
+                        showToast('ID copiado!');
+                      }}
+                      className="font-mono uppercase opacity-70 hover:opacity-100 hover:text-neutral-900 dark:hover:text-neutral-100 transition-all flex items-center gap-1"
+                      title="Copiar meu ID de Usuário"
+                    >
+                      ID: {currentUser.uid.slice(0, 8)}...
+                      <Copy className="w-2.5 h-2.5" />
+                    </button>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                      <span>{onlineCount} online</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           ) : (
-            <button
-              onClick={loginWithGoogle}
-              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-neutral-200 border border-neutral-800 text-xs font-semibold transition-colors"
-            >
-              <LogIn className="w-4 h-4" />
-              <span>Entrar com Google</span>
-            </button>
+            <div className="space-y-2">
+              <button
+                onClick={loginWithGoogle}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-neutral-100 dark:bg-neutral-900 hover:bg-neutral-200 dark:hover:bg-neutral-800 text-neutral-700 dark:text-neutral-200 border border-neutral-200 dark:border-neutral-800 text-xs font-semibold transition-colors"
+              >
+                <LogIn className="w-4 h-4" />
+                <span>Entrar com Google</span>
+              </button>
+              <div className="flex items-center justify-between px-3 py-1 text-[10px] text-neutral-500">
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(myUserId);
+                    showToast('Seu ID foi copiado!');
+                  }}
+                  className="font-mono uppercase opacity-70 hover:opacity-100 hover:text-neutral-900 dark:hover:text-neutral-100 transition-all flex items-center gap-1"
+                  title="Copiar seu ID de Usuário"
+                >
+                  ID: {myUserId}
+                  <Copy className="w-2.5 h-2.5" />
+                </button>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  <span>{onlineCount} online</span>
+                </div>
+              </div>
+            </div>
           )}
 
           <button
             onClick={() => setSettingsOpen(true)}
-            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-neutral-400 hover:text-neutral-200 hover:bg-neutral-900 text-xs transition-colors"
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-900 text-xs transition-colors"
           >
-            <Settings className="w-4 h-4 text-neutral-500" />
+            <Settings className="w-4 h-4 text-neutral-400 dark:text-neutral-500" />
             <span>Configurações</span>
           </button>
         </div>
@@ -620,7 +1208,6 @@ function ChatView({
 }) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { showToast, generationTime, generationState } = useApp();
-  const [activeMenuIndex, setActiveMenuIndex] = useState<any>(null);
   const [speakingIndex, setSpeakingIndex] = useState<number | null>(null);
 
   useEffect(() => {
@@ -628,25 +1215,27 @@ function ChatView({
   }, [messages, isGenerating]);
 
   const handleTTS = (index: number, text: string) => {
-    if (!('speechSynthesis' in window)) {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window) || !window.speechSynthesis) {
       showToast('Síntese de voz não suportada');
       return;
     }
     if (speakingIndex === index) {
-      window.speechSynthesis.cancel();
+      try { window.speechSynthesis.cancel(); } catch (e) {}
       setSpeakingIndex(null);
       return;
     }
-    window.speechSynthesis.cancel();
+    try { window.speechSynthesis.cancel(); } catch (e) {}
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'pt-BR';
-    const voices = window.speechSynthesis.getVoices();
+    const voices = window.speechSynthesis.getVoices ? window.speechSynthesis.getVoices() : [];
     const maleVoice = voices.find(v => v.lang.includes('pt') && (v.name.toLowerCase().includes('male') || v.name.toLowerCase().includes('antonio') || v.name.toLowerCase().includes('lucas')));
     if (maleVoice) utterance.voice = maleVoice;
 
     utterance.onend = () => setSpeakingIndex(null);
     utterance.onerror = () => setSpeakingIndex(null);
-    window.speechSynthesis.speak(utterance);
+    try {
+      window.speechSynthesis.speak(utterance);
+    } catch (e) {}
     setSpeakingIndex(index);
   };
 
@@ -675,12 +1264,12 @@ function ChatView({
   if (messages.length === 0) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-6">
-        <div className="w-16 h-16 rounded-3xl bg-neutral-900 border border-neutral-800 overflow-hidden shadow-xl flex items-center justify-center">
-          <img src="/public/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="DEV AI" className="w-full h-full object-cover" />
+        <div className="w-16 h-16 rounded-3xl bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 overflow-hidden shadow-xl flex items-center justify-center">
+          <img src="/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="DEV AI" className="w-full h-full object-cover" />
         </div>
         <div className="space-y-2 max-w-md">
-          <h2 className="text-xl font-bold text-neutral-100">Como posso ajudar?</h2>
-          <p className="text-xs text-neutral-400">Escolha uma sugestão abaixo ou digite sua solicitação para começar com o Gemini 3.8 Flash.</p>
+          <h2 className="text-xl font-bold text-neutral-900 dark:text-neutral-100">Como posso ajudar?</h2>
+          <p className="text-xs text-neutral-500 dark:text-neutral-400">Escolha uma sugestão abaixo ou digite sua solicitação para começar com o Gemini 3.8 Flash.</p>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-w-lg w-full">
@@ -693,7 +1282,7 @@ function ChatView({
             <button
               key={i}
               onClick={() => onSendMessage(prompt)}
-              className="p-3 rounded-2xl bg-neutral-900/60 hover:bg-neutral-900 border border-neutral-800 text-xs text-neutral-300 hover:text-neutral-100 text-left transition-all"
+              className="p-3 rounded-2xl bg-neutral-100/60 hover:bg-neutral-100 dark:bg-neutral-900/60 dark:hover:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs text-neutral-600 dark:text-neutral-300 hover:text-neutral-900 dark:hover:text-neutral-100 text-left transition-all"
             >
               {prompt}
             </button>
@@ -706,192 +1295,35 @@ function ChatView({
   return (
     <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 scrollbar-thin scrollbar-thumb-neutral-800">
       <div className="max-w-2xl mx-auto space-y-6">
-        {messages.map((msg, index) => {
-          const isUser = msg.role === 'user';
-          const time = new Date(msg.timestamp || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        {messages.map((msg, index) => (
+          <ChatMessageItem 
+            key={index} 
+            msg={msg} 
+            index={index} 
+            chatId={chatId} 
+            userSettings={userSettings} 
+            isGenerating={isGenerating}
+            onRegenerate={onRegenerate}
+            onEditUserMessage={onEditUserMessage}
+            handleTTS={handleTTS}
+            handleCopy={handleCopy}
+            handleDownloadResponse={handleDownloadResponse}
+            speakingIndex={speakingIndex}
+          />
+        ))}
 
-          if (isUser) {
-            return (
-              <div key={index} className="flex flex-col items-end space-y-1 group">
-                <div className="flex items-center gap-2">
-                  <div className="w-6 h-6 rounded-full bg-purple-600 text-white flex items-center justify-center font-bold text-[11px] shadow-xs">
-                    {userSettings.userName.charAt(0)}
-                  </div>
-                </div>
-                <span className="text-[11px] font-bold text-neutral-400 uppercase tracking-wider pr-1">
-                  {userSettings.userName}
-                </span>
-
-                <div className="bg-neutral-900 border border-neutral-800 text-neutral-100 rounded-2xl px-4 py-2.5 text-sm max-w-[85%] shadow-xs">
-                  {msg.content}
-                </div>
-
-                <div className="flex items-center gap-1 pt-1 opacity-80 group-hover:opacity-100 transition-opacity">
-                  <button
-                    onClick={() => handleCopy(msg.content)}
-                    className="p-1 text-neutral-500 hover:text-neutral-200 rounded hover:bg-neutral-900 transition-colors"
-                    title="Copiar mensagem"
-                  >
-                    <Copy className="w-3.5 h-3.5" />
-                  </button>
-
-                  <div className="relative">
-                    <button
-                      onClick={() => setActiveMenuIndex(activeMenuIndex === `u_${index}` ? null : `u_${index}`)}
-                      className="p-1 text-neutral-500 hover:text-neutral-200 rounded hover:bg-neutral-900 transition-colors"
-                      title="Mais opções"
-                    >
-                      <MoreVertical className="w-3.5 h-3.5" />
-                    </button>
-
-                    {activeMenuIndex === `u_${index}` && (
-                      <div className="absolute right-0 mt-1 w-44 bg-neutral-900 border border-neutral-800 rounded-xl shadow-2xl py-1 z-30 text-xs">
-                        <div className="px-3 py-1 text-[10px] text-neutral-500 border-b border-neutral-800">
-                          {time}
-                        </div>
-                        <button
-                          onClick={() => {
-                            handleCopy(msg.content);
-                            setActiveMenuIndex(null);
-                          }}
-                          className="w-full flex items-center gap-2 px-3 py-1.5 text-neutral-300 hover:bg-neutral-800"
-                        >
-                          <Copy className="w-3.5 h-3.5" />
-                          <span>Copiar mensagem</span>
-                        </button>
-                        <button
-                          onClick={() => {
-                            const sel = window.getSelection()?.toString();
-                            if (sel) handleCopy(sel);
-                            else showToast('Selecione o texto desejado na página');
-                            setActiveMenuIndex(null);
-                          }}
-                          className="w-full flex items-center gap-2 px-3 py-1.5 text-neutral-300 hover:bg-neutral-800"
-                        >
-                          <FileText className="w-3.5 h-3.5" />
-                          <span>Selecionar texto</span>
-                        </button>
-                        <button
-                          onClick={() => {
-                            onEditUserMessage(msg.content, index);
-                            setActiveMenuIndex(null);
-                          }}
-                          className="w-full flex items-center gap-2 px-3 py-1.5 text-neutral-300 hover:bg-neutral-800"
-                        >
-                          <Edit2 className="w-3.5 h-3.5" />
-                          <span>Editar mensagem</span>
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          } else {
-            return (
-              <div key={index} className="space-y-2 relative group">
-                <div className="flex items-center gap-2">
-                  <div className="w-6 h-6 rounded-lg bg-neutral-900 overflow-hidden border border-neutral-800 shadow-xs flex items-center justify-center">
-                    <img src="/public/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="DEV AI" className="w-full h-full object-cover" />
-                  </div>
-                  <span className="text-xs font-bold text-neutral-200">DEV AI</span>
-                </div>
-
-                <div className="text-neutral-200 text-sm md:text-base leading-relaxed pl-1">
-                  <MarkdownRenderer content={msg.content} chatId={chatId} userSettings={userSettings} isGenerating={isGenerating} />
-                </div>
-
-                <div className="flex items-center gap-1.5 pt-2 text-neutral-500 relative">
-                  <button
-                    onClick={() => handleTTS(index, msg.content)}
-                    className={`p-1.5 rounded-lg hover:bg-neutral-900 hover:text-neutral-200 transition-colors ${
-                      speakingIndex === index ? 'text-blue-400' : ''
-                    }`}
-                    title="Ouvir resposta (Voz masculina)"
-                  >
-                    {speakingIndex === index ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-                  </button>
-
-                  <button
-                    onClick={() => handleCopy(msg.content)}
-                    className="p-1.5 rounded-lg hover:bg-neutral-900 hover:text-neutral-200 transition-colors"
-                    title="Copiar resposta"
-                  >
-                    <Copy className="w-4 h-4" />
-                  </button>
-
-                  <button
-                    onClick={() => onRegenerate && onRegenerate()}
-                    className="p-1.5 rounded-lg hover:bg-neutral-900 hover:text-neutral-200 transition-colors"
-                    title="Regenerar resposta"
-                  >
-                    <RefreshCw className="w-4 h-4" />
-                  </button>
-
-                  <div className="relative">
-                    <button
-                      onClick={() => setActiveMenuIndex(activeMenuIndex === `ai_${index}` ? null : `ai_${index}`)}
-                      className="p-1.5 rounded-lg hover:bg-neutral-900 hover:text-neutral-200 transition-colors"
-                      title="Mais opções"
-                    >
-                      <MoreVertical className="w-4 h-4" />
-                    </button>
-
-                    {activeMenuIndex === `ai_${index}` && (
-                      <div className="absolute left-0 mt-1 w-44 bg-neutral-900 border border-neutral-800 rounded-xl shadow-2xl py-1 z-30 text-xs">
-                        <div className="px-3 py-1 text-[10px] text-neutral-500 border-b border-neutral-800">
-                          {time}
-                        </div>
-                        <button
-                          onClick={() => {
-                            handleCopy(msg.content);
-                            setActiveMenuIndex(null);
-                          }}
-                          className="w-full flex items-center gap-2 px-3 py-1.5 text-neutral-300 hover:bg-neutral-800"
-                        >
-                          <Copy className="w-3.5 h-3.5" />
-                          <span>Copiar resposta</span>
-                        </button>
-                        <button
-                          onClick={() => {
-                            handleDownloadResponse(msg.content);
-                            setActiveMenuIndex(null);
-                          }}
-                          className="w-full flex items-center gap-2 px-3 py-1.5 text-neutral-300 hover:bg-neutral-800"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          <span>Baixar resposta</span>
-                        </button>
-                        <button
-                          onClick={() => {
-                            onRegenerate();
-                            setActiveMenuIndex(null);
-                          }}
-                          className="w-full flex items-center gap-2 px-3 py-1.5 text-neutral-300 hover:bg-neutral-800"
-                        >
-                          <RefreshCw className="w-3.5 h-3.5" />
-                          <span>Regenerar resposta</span>
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          }
-        })}
 
         {isGenerating && (
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-xs">
-              <div className="w-6 h-6 rounded-lg bg-neutral-900 overflow-hidden border border-neutral-800 flex items-center justify-center">
-                <img src="/public/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="DEV AI" className="w-full h-full object-cover" />
+              <div className="w-6 h-6 rounded-lg bg-neutral-100 dark:bg-neutral-900 overflow-hidden border border-neutral-200 dark:border-neutral-800 flex items-center justify-center shadow-xs">
+                <img src="/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="DEV AI" className="w-full h-full object-cover" />
               </div>
-              <span className="font-bold text-neutral-200">DEV AI</span>
-              <span className="text-neutral-500">·</span>
-              <span className="text-neutral-400">{generationState || 'Pensando...'}</span>
-              <span className="text-neutral-500">·</span>
-              <span className="font-mono text-neutral-400">{formatTimer(generationTime)}</span>
+              <span className="font-bold text-neutral-900 dark:text-neutral-200">DEV AI</span>
+              <span className="text-neutral-400 dark:text-neutral-500">·</span>
+              <span className="text-neutral-600 dark:text-neutral-400">{generationState || 'Pensando...'}</span>
+              <span className="text-neutral-400 dark:text-neutral-500">·</span>
+              <span className="font-mono text-neutral-500 dark:text-neutral-400">{formatTimer(generationTime)}</span>
             </div>
 
             <div className="flex items-center gap-1.5 py-1 pl-2">
@@ -917,39 +1349,100 @@ function CameraModal({ onCapture }: { onCapture: (photos: string[]) => void }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [capturedPhotos, setCapturedPhotos] = useState<string[]>([]);
-  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
+  const [cameraError, setCameraError] = useState<string | null>(null);
+
+  // Android Camera states matching screenshot 1
+  const [zoom, setZoom] = useState<'0.6' | '1x' | '2'>('1x');
+  const [flashMode, setFlashMode] = useState<'off' | 'auto' | 'on'>('off');
+  const [activeMode, setActiveMode] = useState<'noite' | 'video' | 'foto' | 'retrato' | 'pro'>('foto');
+  const [activeFilter, setActiveFilter] = useState<'none' | 'vivid' | 'warm' | 'bw' | 'retro'>('none');
+  const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
+  const [showLevel, setShowLevel] = useState(true);
+  const [showGrid, setShowGrid] = useState(false);
+  const [flashActive, setFlashActive] = useState(false);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const [timerSeconds, setTimerSeconds] = useState<0 | 3 | 10>(0);
 
   useEffect(() => {
     if (cameraModalOpen) {
-      navigator.mediaDevices.getUserMedia({ video: { facingMode } })
+      setCameraError(null);
+      if (!navigator?.mediaDevices?.getUserMedia) {
+        setCameraError('Câmera não suportada neste dispositivo.');
+        return;
+      }
+      navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          facingMode,
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        } 
+      })
         .then(s => {
           setStream(s);
           if (videoRef.current) videoRef.current.srcObject = s;
         })
-        .catch(err => console.error('Erro ao acessar câmera:', err));
+        .catch(err => {
+          console.error('Erro ao acessar câmera:', err);
+          setCameraError('Permissão da câmera negada ou dispositivo indisponível.');
+        });
     } else {
       if (stream) {
-        stream.getTracks().forEach(t => t.stop());
+        try { stream.getTracks().forEach(t => t.stop()); } catch (e) {}
         setStream(null);
       }
       setCapturedPhotos([]);
+      setShowSettingsDrawer(false);
+      setCountdown(null);
     }
     return () => {
-      if (stream) stream.getTracks().forEach(t => t.stop());
+      if (stream) {
+        try { stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+      }
     };
   }, [cameraModalOpen, facingMode]);
 
   if (!cameraModalOpen) return null;
 
   const takeSnapshot = () => {
+    if (timerSeconds > 0 && countdown === null) {
+      setCountdown(timerSeconds);
+      let count = timerSeconds;
+      const interval = setInterval(() => {
+        count--;
+        if (count <= 0) {
+          clearInterval(interval);
+          setCountdown(null);
+          executeCapture();
+        } else {
+          setCountdown(count);
+        }
+      }, 1000);
+      return;
+    }
+    executeCapture();
+  };
+
+  const executeCapture = () => {
     if (videoRef.current) {
+      // Trigger white flash animation
+      setFlashActive(true);
+      setTimeout(() => setFlashActive(false), 160);
+
       const canvas = document.createElement('canvas');
-      canvas.width = videoRef.current.videoWidth || 640;
-      canvas.height = videoRef.current.videoHeight || 480;
+      const video = videoRef.current;
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
       const ctx = canvas.getContext('2d');
       if (ctx) {
-        ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/png');
+        // Apply filter to canvas if selected
+        if (activeFilter === 'bw') ctx.filter = 'grayscale(100%)';
+        else if (activeFilter === 'warm') ctx.filter = 'sepia(30%) saturate(140%)';
+        else if (activeFilter === 'vivid') ctx.filter = 'saturate(160%) contrast(110%)';
+        else if (activeFilter === 'retro') ctx.filter = 'contrast(120%) brightness(90%) sepia(20%)';
+
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
         setCapturedPhotos(prev => [...prev, dataUrl]);
       }
     }
@@ -962,53 +1455,331 @@ function CameraModal({ onCapture }: { onCapture: (photos: string[]) => void }) {
     }
   };
 
+  const cycleFlash = () => {
+    if (flashMode === 'off') setFlashMode('auto');
+    else if (flashMode === 'auto') setFlashMode('on');
+    else setFlashMode('off');
+  };
+
+  const cycleFilter = () => {
+    const filters: Array<'none' | 'vivid' | 'warm' | 'bw' | 'retro'> = ['none', 'vivid', 'warm', 'bw', 'retro'];
+    const nextIdx = (filters.indexOf(activeFilter) + 1) % filters.length;
+    setActiveFilter(filters[nextIdx]);
+  };
+
+  const getZoomScale = () => {
+    if (zoom === '0.6') return 'scale(0.85)';
+    if (zoom === '2') return 'scale(1.5)';
+    return 'scale(1)';
+  };
+
+  const getFilterStyle = () => {
+    if (activeFilter === 'bw') return 'grayscale(100%)';
+    if (activeFilter === 'warm') return 'sepia(30%) saturate(140%)';
+    if (activeFilter === 'vivid') return 'saturate(160%) contrast(110%)';
+    if (activeFilter === 'retro') return 'contrast(120%) brightness(90%) sepia(20%)';
+    return 'none';
+  };
+
   return (
-    <div className="fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-between p-4 md:p-8">
-      <div className="w-full flex items-center justify-between max-w-2xl">
-        <span className="font-bold text-sm text-neutral-200">Câmera DEV AI</span>
-        <button onClick={() => setCameraModalOpen(false)} className="p-2 text-neutral-400 hover:text-white">
-          <X className="w-5 h-5" />
-        </button>
-      </div>
-
-      <div className="relative w-full max-w-xl bg-neutral-900 border border-neutral-800 rounded-3xl overflow-hidden shadow-2xl flex flex-col items-center">
-        <video ref={videoRef} autoPlay playsInline className="w-full aspect-video object-cover bg-black" />
-
-        {capturedPhotos.length > 0 && (
-          <div className="flex gap-2 p-3 bg-neutral-950 w-full overflow-x-auto border-t border-neutral-800">
-            {capturedPhotos.map((photo, idx) => (
-              <div key={idx} className="relative w-14 h-14 rounded-lg overflow-hidden border border-neutral-700 shrink-0">
-                <img src={photo} alt="snap" className="w-full h-full object-cover" />
-                <button
-                  onClick={() => setCapturedPhotos(prev => prev.filter((_, i) => i !== idx))}
-                  className="absolute top-0.5 right-0.5 bg-black/70 text-white rounded-full p-0.5"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className="flex items-center gap-4 pb-4">
+    <div className="fixed inset-0 z-[200] bg-black flex flex-col justify-between text-white select-none overflow-hidden font-sans">
+      {/* 1. TOP BAR MATCHING SCREENSHOT 1 */}
+      <div className="relative w-full px-4 pt-3 pb-2 flex items-center justify-between z-30">
+        {/* Flash Toggle */}
         <button
-          onClick={takeSnapshot}
-          className="px-6 py-3 rounded-2xl bg-white text-neutral-950 font-bold text-xs shadow-lg hover:bg-neutral-200 transition-all flex items-center gap-2"
+          type="button"
+          onClick={cycleFlash}
+          className="p-2 text-white/90 hover:text-white transition-colors"
+          title={`Flash: ${flashMode.toUpperCase()}`}
         >
-          <Camera className="w-4 h-4" />
-          <span>Tirar Foto ({capturedPhotos.length})</span>
+          {flashMode === 'off' ? (
+            <ZapOff className="w-6 h-6 stroke-[1.8]" />
+          ) : (
+            <div className="relative">
+              <Zap className={`w-6 h-6 stroke-[1.8] ${flashMode === 'on' ? 'fill-amber-400 text-amber-400' : 'text-white'}`} />
+              {flashMode === 'auto' && (
+                <span className="absolute -top-1 -right-1 text-[10px] font-bold text-amber-300">A</span>
+              )}
+            </div>
+          )}
         </button>
 
-        {capturedPhotos.length > 0 && (
-          <button
-            onClick={handleConfirm}
-            className="px-6 py-3 rounded-2xl bg-blue-600 text-white font-bold text-xs shadow-lg hover:bg-blue-500 transition-all"
-          >
-            Enviar Fotos
-          </button>
-        )}
+        {/* Center Pill with Down Chevron for Quick Settings */}
+        <button
+          type="button"
+          onClick={() => setShowSettingsDrawer(!showSettingsDrawer)}
+          className="bg-neutral-800/90 hover:bg-neutral-700/90 px-4 py-1.5 rounded-full flex items-center justify-center transition-all shadow-md active:scale-95"
+          title="Opções da câmera"
+        >
+          <ChevronDown className={`w-5 h-5 text-neutral-200 transition-transform duration-200 ${showSettingsDrawer ? 'rotate-180' : ''}`} />
+        </button>
+
+        {/* Android Privacy Green Dot */}
+        <div className="flex items-center justify-center w-6 h-6">
+          <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-sm shadow-emerald-400/80 animate-pulse" />
+        </div>
       </div>
+
+      {/* Quick Settings Drawer Overlay (when center pill tapped) */}
+      {showSettingsDrawer && (
+        <div className="absolute top-14 inset-x-4 z-40 bg-neutral-900/95 backdrop-blur-xl border border-neutral-800 rounded-3xl p-4 shadow-2xl animate-in fade-in slide-in-from-top-3 duration-200 text-xs max-w-md mx-auto">
+          <div className="grid grid-cols-3 gap-3 text-center">
+            <button
+              onClick={() => setShowLevel(!showLevel)}
+              className={`p-2.5 rounded-2xl border transition-all ${
+                showLevel ? 'bg-amber-400/20 border-amber-400 text-amber-300' : 'bg-neutral-800 border-neutral-700 text-neutral-400'
+              }`}
+            >
+              <div className="font-bold text-[11px]">Nível</div>
+              <div className="text-[10px] opacity-70">{showLevel ? 'Ativado' : 'Desativado'}</div>
+            </button>
+
+            <button
+              onClick={() => setShowGrid(!showGrid)}
+              className={`p-2.5 rounded-2xl border transition-all ${
+                showGrid ? 'bg-amber-400/20 border-amber-400 text-amber-300' : 'bg-neutral-800 border-neutral-700 text-neutral-400'
+              }`}
+            >
+              <div className="font-bold text-[11px]">Grade 3x3</div>
+              <div className="text-[10px] opacity-70">{showGrid ? 'Ativada' : 'Desativada'}</div>
+            </button>
+
+            <button
+              onClick={() => setTimerSeconds(t => (t === 0 ? 3 : t === 3 ? 10 : 0))}
+              className={`p-2.5 rounded-2xl border transition-all ${
+                timerSeconds > 0 ? 'bg-amber-400/20 border-amber-400 text-amber-300' : 'bg-neutral-800 border-neutral-700 text-neutral-400'
+              }`}
+            >
+              <div className="font-bold text-[11px]">Timer</div>
+              <div className="text-[10px] opacity-70">{timerSeconds === 0 ? 'Desligado' : `${timerSeconds}s`}</div>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 2. VIEWFINDER FRAMING MATCHING SCREENSHOT 1 */}
+      <div className="relative flex-1 flex items-center justify-center px-2 py-1 overflow-hidden">
+        <div className="relative w-full max-w-sm sm:max-w-md aspect-[3/4] bg-neutral-950 rounded-2xl sm:rounded-3xl overflow-hidden shadow-2xl flex items-center justify-center border border-neutral-900">
+          {cameraError ? (
+            <div className="p-8 text-center text-red-400 space-y-2">
+              <AlertTriangle className="w-10 h-10 mx-auto" />
+              <p className="text-xs">{cameraError}</p>
+            </div>
+          ) : (
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-cover transition-transform duration-300"
+              style={{
+                transform: getZoomScale(),
+                filter: getFilterStyle()
+              }}
+            />
+          )}
+
+          {/* Shutter Flash Animation */}
+          {flashActive && (
+            <div className="absolute inset-0 bg-white z-30 pointer-events-none transition-opacity duration-150" />
+          )}
+
+          {/* Timer Countdown Overlay */}
+          {countdown !== null && (
+            <div className="absolute inset-0 flex items-center justify-center z-30 pointer-events-none bg-black/30">
+              <span className="text-7xl font-extrabold text-amber-400 animate-ping">
+                {countdown}
+              </span>
+            </div>
+          )}
+
+          {/* Framing Corner Brackets ⌜ ⌝ ⌞ ⌟ matching Screenshot 1 */}
+          <div className="absolute top-3.5 left-3.5 w-4 h-4 border-t-[1.5px] border-l-[1.5px] border-white/70 rounded-tl-xs pointer-events-none" />
+          <div className="absolute top-3.5 right-3.5 w-4 h-4 border-t-[1.5px] border-r-[1.5px] border-white/70 rounded-tr-xs pointer-events-none" />
+          <div className="absolute bottom-3.5 left-3.5 w-4 h-4 border-b-[1.5px] border-l-[1.5px] border-white/70 rounded-bl-xs pointer-events-none" />
+          <div className="absolute bottom-3.5 right-3.5 w-4 h-4 border-b-[1.5px] border-r-[1.5px] border-white/70 rounded-br-xs pointer-events-none" />
+
+          {/* 3x3 Grid Overlay (if enabled) */}
+          {showGrid && (
+            <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 pointer-events-none border border-white/10 divide-x divide-y divide-white/15" />
+          )}
+
+          {/* Horizon Level Guide in the Center —|— matching Screenshot 1 */}
+          {showLevel && (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+              <div className="relative flex items-center justify-center w-36 sm:w-44 opacity-85">
+                <div className="w-full h-[1.5px] bg-white shadow-xs" />
+                <div className="absolute w-[1.5px] h-3.5 bg-white shadow-xs" />
+              </div>
+            </div>
+          )}
+
+          {/* Zoom Selector & Effects Burst at the bottom inside viewfinder matching Screenshot 1 */}
+          <div className="absolute bottom-4 inset-x-4 flex items-center justify-between z-20 pointer-events-auto">
+            <div className="w-10" />
+
+            {/* Zoom Pill: 0.6 | 1x | 2 */}
+            <div className="bg-black/60 backdrop-blur-md px-1.5 py-1 rounded-full flex items-center gap-1 border border-white/10 text-xs shadow-lg">
+              <button
+                type="button"
+                onClick={() => setZoom('0.6')}
+                className={`px-2 py-0.5 rounded-full transition-all text-[11px] ${
+                  zoom === '0.6' ? 'bg-neutral-800 text-amber-300 font-bold shadow-xs' : 'text-white/80 hover:text-white'
+                }`}
+              >
+                0.6
+              </button>
+              <button
+                type="button"
+                onClick={() => setZoom('1x')}
+                className={`px-2.5 py-0.5 rounded-full transition-all text-[11px] ${
+                  zoom === '1x' ? 'bg-neutral-800 text-amber-300 font-bold shadow-xs' : 'text-white/80 hover:text-white'
+                }`}
+              >
+                1x
+              </button>
+              <button
+                type="button"
+                onClick={() => setZoom('2')}
+                className={`px-2 py-0.5 rounded-full transition-all text-[11px] ${
+                  zoom === '2' ? 'bg-neutral-800 text-amber-300 font-bold shadow-xs' : 'text-white/80 hover:text-white'
+                }`}
+              >
+                2
+              </button>
+            </div>
+
+            {/* Sparkle / Magic Burst Button matching Screenshot 1 */}
+            <button
+              type="button"
+              onClick={cycleFilter}
+              className={`p-2 rounded-full backdrop-blur-md border border-white/10 transition-all ${
+                activeFilter !== 'none' ? 'bg-amber-400/30 text-amber-300 border-amber-400/50' : 'bg-black/60 text-white/90 hover:text-white'
+              }`}
+              title={`Efeito: ${activeFilter.toUpperCase()}`}
+            >
+              <Sparkles className="w-4 h-4 stroke-[2]" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* 3. MODE SELECTOR BELOW VIEWFINDER MATCHING SCREENSHOT 1 */}
+      <div className="w-full flex items-center justify-center gap-6 py-2 select-none overflow-x-auto scrollbar-none z-20">
+        <button
+          type="button"
+          onClick={() => setActiveMode('noite')}
+          className={`text-xs transition-colors whitespace-nowrap ${
+            activeMode === 'noite' ? 'text-amber-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'
+          }`}
+        >
+          Noite
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveMode('video')}
+          className={`text-xs transition-colors whitespace-nowrap ${
+            activeMode === 'video' ? 'text-amber-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'
+          }`}
+        >
+          Vídeo
+        </button>
+        {/* Foto Mode highlighted in warm gold yellow matching Screenshot 1 */}
+        <button
+          type="button"
+          onClick={() => setActiveMode('foto')}
+          className="text-amber-400 font-bold text-sm tracking-wide whitespace-nowrap px-1"
+        >
+          Foto
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveMode('retrato')}
+          className={`text-xs transition-colors whitespace-nowrap ${
+            activeMode === 'retrato' ? 'text-amber-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'
+          }`}
+        >
+          Retrato
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveMode('pro')}
+          className={`text-xs transition-colors whitespace-nowrap ${
+            activeMode === 'pro' ? 'text-amber-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'
+          }`}
+        >
+          Pro
+        </button>
+      </div>
+
+      {/* 4. CONFIRMATION FLOATING BUTTON (IF PHOTOS CAPTURED) */}
+      {capturedPhotos.length > 0 && (
+        <div className="w-full flex items-center justify-center px-4 py-1 z-30 animate-in fade-in slide-in-from-bottom-2">
+          <button
+            type="button"
+            onClick={handleConfirm}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-full bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-xl active:scale-95 transition-all"
+          >
+            <Check className="w-4 h-4" />
+            <span>Enviar fotos capturadas ({capturedPhotos.length})</span>
+          </button>
+        </div>
+      )}
+
+      {/* 5. BOTTOM SHUTTER CONTROLS BAR MATCHING SCREENSHOT 1 */}
+      <div className="w-full max-w-md mx-auto px-6 py-4 flex items-center justify-between z-20">
+        {/* Left: Close 'X' button OR Thumbnail of last captured photo */}
+        <div className="w-14 flex items-center justify-center">
+          {capturedPhotos.length > 0 ? (
+            <div 
+              onClick={handleConfirm}
+              className="relative w-11 h-11 rounded-full overflow-hidden border-2 border-white cursor-pointer shadow-lg active:scale-90 transition-transform"
+              title="Confirmar envio"
+            >
+              <img src={capturedPhotos[capturedPhotos.length - 1]} alt="thumb" className="w-full h-full object-cover" />
+              <div className="absolute top-0 right-0 bg-blue-600 text-[10px] text-white font-bold w-4 h-4 rounded-full flex items-center justify-center">
+                {capturedPhotos.length}
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setCameraModalOpen(false)}
+              className="p-3 text-white/90 hover:text-white rounded-full hover:bg-neutral-900 transition-colors active:scale-90"
+              title="Fechar câmera"
+            >
+              <X className="w-7 h-7 stroke-[2]" />
+            </button>
+          )}
+        </div>
+
+        {/* Center: Iconic Android Double-Ring Shutter Button matching Screenshot 1 */}
+        <div className="flex items-center justify-center">
+          <button
+            type="button"
+            onClick={takeSnapshot}
+            className="w-20 h-20 rounded-full border-[3.5px] border-white p-1 flex items-center justify-center cursor-pointer active:scale-95 transition-all shadow-2xl focus:outline-none"
+            title="Tirar foto"
+          >
+            <div className="w-full h-full rounded-full bg-white active:bg-neutral-300 transition-colors shadow-md" />
+          </button>
+        </div>
+
+        {/* Right: Flip Camera button matching Screenshot 1 */}
+        <div className="w-14 flex items-center justify-center">
+          <button
+            type="button"
+            onClick={() => setFacingMode(f => (f === 'user' ? 'environment' : 'user'))}
+            className="p-3 text-white/90 hover:text-white rounded-full bg-neutral-900/60 hover:bg-neutral-800 transition-all active:rotate-180 duration-300 shadow-md"
+            title="Inverter câmera (Frontal / Traseira)"
+          >
+            <RefreshCw className="w-6 h-6 stroke-[2]" />
+          </button>
+        </div>
+      </div>
+
+      {/* 6. BOTTOM ANDROID GESTURE INDICATOR BAR MATCHING SCREENSHOT 1 */}
+      <div className="w-32 h-1 bg-white/70 rounded-full mx-auto mb-2 shrink-0" />
     </div>
   );
 }
@@ -1017,77 +1788,587 @@ function CameraModal({ onCapture }: { onCapture: (photos: string[]) => void }) {
 // GEMINI LIVE MODE MODAL (USING gemini-3.8-live)
 // ==========================================
 
-function GeminiLiveModal() {
-  const { geminiLiveOpen, setGeminiLiveOpen, showToast } = useApp();
-  const [isRecording, setIsRecording] = useState(false);
+// ==========================================
+// GEMINI LIVE MODE MODAL (DEV LIVE)
+// ==========================================
+
+function DevLiveModal() {
+  const { geminiLiveOpen, setGeminiLiveOpen } = useApp();
+  const [isMuted, setIsMuted] = useState(false);
+  const [cameraOn, setCameraOn] = useState(false);
   const [sharingScreen, setSharingScreen] = useState(false);
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
+  const [volume, setVolume] = useState(0);
+  const [frequencyData, setFrequencyData] = useState<number[]>(new Array(10).fill(0));
+  const [callState, setCallState] = useState<'listening' | 'thinking' | 'speaking'>('listening');
+  const [userTranscript, setUserTranscript] = useState('');
+  const [aiSpeechText, setAiSpeechText] = useState('Olá! Estou conectado na chamada Dev Live. Pode falar comigo.');
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const screenRef = useRef<HTMLVideoElement>(null);
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const recognitionRef = useRef<any>(null);
+  const pauseTimerRef = useRef<any>(null);
+  const isSpeakingAiRef = useRef(false);
+
+  // Request voice answer from Gemini and speak aloud
+  const askAiReply = async (queryText: string) => {
+    if (!queryText.trim() || isSpeakingAiRef.current) return;
+    setCallState('thinking');
+
+    try {
+      const res = await fetch('/api/live/reply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcript: queryText })
+      });
+      const data = await res.json();
+      const reply = data.replyText || 'Estou ouvindo você perfeitamente! Como posso te ajudar agora?';
+      
+      setAiSpeechText(reply);
+      setCallState('speaking');
+      isSpeakingAiRef.current = true;
+
+      // Real Speech Synthesis voice out loud
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window && window.speechSynthesis) {
+        try {
+          window.speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance(reply);
+          utterance.lang = 'pt-BR';
+          utterance.rate = 1.05;
+
+          const voices = window.speechSynthesis.getVoices ? window.speechSynthesis.getVoices() : [];
+          const ptVoice = voices.find(v => v.lang.includes('pt') && (v.name.includes('Google') || v.name.includes('Luciana') || v.name.includes('Antonio') || v.name.includes('Natural')));
+          if (ptVoice) utterance.voice = ptVoice;
+
+          utterance.onend = () => {
+            isSpeakingAiRef.current = false;
+            setCallState('listening');
+            setUserTranscript('');
+          };
+          utterance.onerror = () => {
+            isSpeakingAiRef.current = false;
+            setCallState('listening');
+          };
+
+          window.speechSynthesis.speak(utterance);
+        } catch (e) {
+          isSpeakingAiRef.current = false;
+          setCallState('listening');
+        }
+      } else {
+        isSpeakingAiRef.current = false;
+        setCallState('listening');
+      }
+    } catch (e) {
+      console.error(e);
+      setCallState('listening');
+    }
+  };
+
+  useEffect(() => {
+    if (!geminiLiveOpen) {
+      stopMedia();
+      return;
+    }
+
+    const startMedia = async () => {
+      try {
+        if (!navigator?.mediaDevices?.getUserMedia) {
+          console.warn('getUserMedia não disponível');
+          return;
+        }
+
+        const s = await navigator.mediaDevices.getUserMedia({ 
+          audio: true, 
+          video: cameraOn ? { facingMode } : false 
+        });
+        setStream(s);
+        if (videoRef.current && cameraOn) {
+          videoRef.current.srcObject = s;
+        }
+
+        // Setup Audio Analyser
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtx) {
+          try {
+            audioContextRef.current = new AudioCtx();
+            if (audioContextRef.current.state === 'suspended') {
+              await audioContextRef.current.resume();
+            }
+
+            const source = audioContextRef.current.createMediaStreamSource(s);
+            analyserRef.current = audioContextRef.current.createAnalyser();
+            analyserRef.current.fftSize = 64; 
+            source.connect(analyserRef.current);
+
+            const bufferLength = analyserRef.current.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            
+            const updateVisuals = () => {
+              if (analyserRef.current) {
+                analyserRef.current.getByteFrequencyData(dataArray);
+                const sum = dataArray.reduce((a, b) => a + b, 0);
+                const avg = sum / dataArray.length;
+
+                // Strict Noise Gate: Ignore volume below 24
+                const realVolume = isMuted ? 0 : (avg > 24 ? avg : 0);
+                setVolume(realVolume);
+                
+                // Map frequency data to bass bars
+                const bars = Array.from(dataArray).slice(0, 10).map(v => isMuted ? 0 : (v > 20 ? v : 0));
+                setFrequencyData(bars);
+                
+                // Interrupt AI if user speaks loud enough
+                if (realVolume > 35 && isSpeakingAiRef.current) {
+                  if (typeof window !== 'undefined' && 'speechSynthesis' in window && window.speechSynthesis) {
+                    try { window.speechSynthesis.cancel(); } catch (e) {}
+                  }
+                  isSpeakingAiRef.current = false;
+                  setCallState('listening');
+                }
+
+                animationFrameRef.current = requestAnimationFrame(updateVisuals);
+              }
+            };
+            updateVisuals();
+          } catch (e) {
+            console.warn('AudioContext not started:', e);
+          }
+        }
+
+        // Speech recognition
+        const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        if (SpeechRec) {
+          const rec = new SpeechRec();
+          rec.lang = 'pt-BR';
+          rec.continuous = true;
+          rec.interimResults = true;
+
+          rec.onresult = (event: any) => {
+            if (isMuted) return;
+            let current = '';
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+              current += event.results[i][0].transcript;
+            }
+            if (current.trim()) {
+              setUserTranscript(current);
+
+              if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current);
+
+              // Wait 1.4s after speaking to respond
+              pauseTimerRef.current = setTimeout(() => {
+                askAiReply(current);
+              }, 1400);
+            }
+          };
+
+          rec.onerror = (err: any) => {
+            console.log('Speech rec notice:', err?.error);
+          };
+
+          rec.onend = () => {
+            if (geminiLiveOpen && !isMuted) {
+              try { rec.start(); } catch (e) {}
+            }
+          };
+
+          try {
+            rec.start();
+            recognitionRef.current = rec;
+          } catch (e) {}
+        }
+
+        // Voice greeting when connecting
+        setTimeout(() => {
+          if (!isSpeakingAiRef.current && typeof window !== 'undefined' && 'speechSynthesis' in window && window.speechSynthesis && typeof SpeechSynthesisUtterance !== 'undefined') {
+            try {
+              window.speechSynthesis.cancel();
+              const welcome = new SpeechSynthesisUtterance('Chamada Dev Live iniciada. Estou ouvindo você.');
+              welcome.lang = 'pt-BR';
+              welcome.rate = 1.05;
+              window.speechSynthesis.speak(welcome);
+            } catch (e) {}
+          }
+        }, 500);
+
+      } catch (err) {
+        console.error('Erro ao acessar mídia:', err);
+      }
+    };
+    startMedia();
+
+    return () => {
+      stopMedia();
+    };
+  }, [geminiLiveOpen, cameraOn, facingMode, isMuted]);
+
+  const stopMedia = () => {
+    if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current);
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
+      recognitionRef.current = null;
+    }
+    if (typeof window !== 'undefined' && window.speechSynthesis && typeof window.speechSynthesis.cancel === 'function') {
+      try { window.speechSynthesis.cancel(); } catch (e) {}
+    }
+    isSpeakingAiRef.current = false;
+
+    if (stream) {
+      try { stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+      setStream(null);
+    }
+    if (screenStream) {
+      try { screenStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+      setScreenStream(null);
+    }
+    if (audioContextRef.current) {
+      try { audioContextRef.current.close().catch(() => {}); } catch (e) {}
+      audioContextRef.current = null;
+    }
+    if (animationFrameRef.current !== null && typeof cancelAnimationFrame === 'function') {
+      try { cancelAnimationFrame(animationFrameRef.current); } catch (e) {}
+      animationFrameRef.current = null;
+    }
+    setSharingScreen(false);
+  };
+
+  const handleScreenShare = async () => {
+    if (sharingScreen) {
+      if (screenStream) screenStream.getTracks().forEach(t => t.stop());
+      setScreenStream(null);
+      setSharingScreen(false);
+      return;
+    }
+    try {
+      const s = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      setScreenStream(s);
+      setSharingScreen(true);
+      if (screenRef.current) screenRef.current.srcObject = s;
+      s.getVideoTracks()[0].onended = () => {
+        setSharingScreen(false);
+        setScreenStream(null);
+      };
+    } catch (err) {
+      console.error('Erro ao compartilhar tela:', err);
+    }
+  };
 
   if (!geminiLiveOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-neutral-950/95 backdrop-blur-xl flex flex-col items-center justify-between p-6 animate-fadeIn">
-      <div className="w-full flex items-center justify-between max-w-4xl">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-2xl bg-neutral-900 overflow-hidden border border-neutral-800 flex items-center justify-center">
-            <img src="/public/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="DEV AI" className="w-full h-full object-cover" />
+    <div className="fixed inset-0 z-[9999] bg-neutral-950 flex items-center justify-center overflow-hidden font-sans select-none">
+      {/* Background (Camera or Animation) */}
+      {cameraOn && stream ? (
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className="absolute inset-0 w-full h-full object-cover"
+        />
+      ) : (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black px-4">
+          <div className="relative w-64 h-64 md:w-80 md:h-80 flex items-center justify-center">
+            {/* Background Rings */}
+            <div 
+              className={`absolute inset-0 rounded-full border transition-transform duration-75 ${callState === 'speaking' ? 'border-blue-500/30 bg-blue-500/10 scale-105' : 'border-emerald-500/10 bg-emerald-500/5'}`}
+              style={{ transform: `scale(${1 + volume / 90})` }}
+            />
+            <div 
+              className={`absolute inset-8 rounded-full border transition-transform duration-100 ${callState === 'speaking' ? 'border-blue-500/40 bg-blue-500/15' : 'border-emerald-500/20 bg-emerald-500/10'}`}
+              style={{ transform: `scale(${1 + volume / 130})` }}
+            />
+            
+            {/* Visualizer Bars (Grave/Bass) */}
+            <div className="absolute inset-0 flex items-center justify-center gap-1.5 px-10">
+              {frequencyData.map((v, i) => {
+                const simulatedBar = callState === 'speaking' ? Math.floor(Math.sin(Date.now() / 150 + i) * 30 + 35) : v;
+                return (
+                  <div 
+                    key={i} 
+                    className={`w-1.5 rounded-full transition-all duration-75 ${callState === 'speaking' ? 'bg-blue-400' : 'bg-emerald-400'}`}
+                    style={{ 
+                      height: `${Math.max(6, simulatedBar / 2)}px`, 
+                      opacity: 0.3 + (simulatedBar / 255) 
+                    }}
+                  />
+                );
+              })}
+            </div>
+
+            <div className={`relative w-32 h-32 md:w-40 md:h-40 rounded-full border flex items-center justify-center shadow-2xl z-10 transition-all ${
+              callState === 'speaking' 
+                ? 'bg-neutral-900 border-blue-500 shadow-[0_0_50px_rgba(59,130,246,0.3)]' 
+                : callState === 'thinking'
+                ? 'bg-neutral-900 border-amber-500 shadow-[0_0_50px_rgba(245,158,11,0.2)]'
+                : 'bg-neutral-900 border-neutral-800'
+            }`}>
+              <PhoneCall className={`w-12 h-12 md:w-16 md:h-16 transition-colors duration-300 ${
+                callState === 'speaking' 
+                  ? 'text-blue-400 animate-pulse' 
+                  : callState === 'thinking'
+                  ? 'text-amber-400 animate-bounce'
+                  : volume > 10 
+                  ? 'text-emerald-400' 
+                  : 'text-neutral-600'
+              }`} />
+            </div>
+          </div>
+          
+          {/* Real-time Subtitles / Transcription */}
+          <div className="mt-8 max-w-lg w-full px-4 text-center space-y-3">
+             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-neutral-900 border border-neutral-800 text-[10px] font-bold uppercase tracking-widest text-neutral-400">
+                <span className={`w-2 h-2 rounded-full ${
+                  callState === 'speaking' ? 'bg-blue-500 animate-pulse' : callState === 'thinking' ? 'bg-amber-500 animate-spin' : 'bg-emerald-500 animate-pulse'
+                }`} />
+                <span>
+                  {callState === 'speaking' ? 'DEV AI FALANDO' : callState === 'thinking' ? 'PROCESSANDO RESPOSTA...' : 'OUVINDO SUA VOZ'}
+                </span>
+             </div>
+
+             <div className="min-h-[50px] flex items-center justify-center">
+               {callState === 'speaking' ? (
+                 <p className="text-blue-200 text-sm md:text-base font-semibold leading-relaxed animate-in fade-in">
+                   "{aiSpeechText}"
+                 </p>
+               ) : userTranscript ? (
+                 <p className="text-white text-sm md:text-base font-medium leading-relaxed">
+                   Você: <span className="italic">"{userTranscript}"</span>
+                 </p>
+               ) : (
+                 <p className="text-neutral-500 text-xs md:text-sm">
+                   Fale naturalmente com o microfone ou escolha uma pergunta rápida abaixo:
+                 </p>
+               )}
+             </div>
+
+             {/* Quick Questions Chips */}
+             <div className="flex flex-wrap items-center justify-center gap-1.5 pt-2">
+               {[
+                 'Como você pode me ajudar?',
+                 'Me dê uma dica rápida de código',
+                 'O que você consegue criar?'
+               ].map((prompt, i) => (
+                 <button
+                   key={i}
+                   onClick={() => {
+                     setUserTranscript(prompt);
+                     askAiReply(prompt);
+                   }}
+                   className="px-3 py-1.5 rounded-full bg-neutral-900/90 hover:bg-neutral-800 border border-neutral-800 text-[11px] text-neutral-300 hover:text-white transition-all active:scale-95"
+                 >
+                   {prompt}
+                 </button>
+               ))}
+             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Screen Share Mini Popup */}
+      {sharingScreen && (
+        <div className="absolute top-24 right-4 md:top-8 md:right-8 w-48 md:w-64 aspect-video bg-neutral-900 border-2 border-blue-500 rounded-2xl overflow-hidden shadow-[0_0_40px_rgba(59,130,246,0.3)] z-50 animate-in slide-in-from-right duration-500">
+           <video ref={screenRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+           <div className="absolute top-2 right-2 flex items-center gap-1.5 px-2 py-1 bg-blue-500 text-white text-[8px] font-black uppercase rounded-lg shadow-lg">
+             <div className="w-1 h-1 rounded-full bg-white animate-pulse" />
+             LIVE
+           </div>
+        </div>
+      )}
+
+      {/* Top Info */}
+      <div className="absolute top-0 left-0 right-0 p-6 md:p-8 z-10 bg-gradient-to-b from-black/80 to-transparent pointer-events-none">
+        <div className="flex items-center gap-4">
+          <div className="w-10 h-10 md:w-12 md:h-12 rounded-2xl bg-white/10 backdrop-blur-xl border border-white/20 p-2 flex items-center justify-center overflow-hidden">
+            <img src="/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="Dev AI" className="w-full h-full object-cover" />
           </div>
           <div>
-            <h2 className="font-bold text-neutral-100 text-base">Gemini 3.8 Live (Ligação Ativa)</h2>
-            <p className="text-xs text-emerald-400">Chamada de voz em tempo real conectada</p>
+            <h3 className="text-white font-black text-base md:text-lg tracking-tight">DEV LIVE</h3>
+            <div className="flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              <p className="text-[9px] font-black text-emerald-400 uppercase tracking-widest">Chamada de Voz Ativa</p>
+            </div>
           </div>
-        </div>
-
-        <button
-          onClick={() => setGeminiLiveOpen(false)}
-          className="p-2 bg-neutral-900 border border-neutral-800 text-neutral-300 hover:text-white rounded-xl"
-        >
-          <X className="w-5 h-5" />
-        </button>
-      </div>
-
-      <div className="flex flex-col items-center justify-center space-y-6 my-auto">
-        <div className="relative w-36 h-36 rounded-full bg-gradient-to-tr from-neutral-800 to-neutral-700 border border-neutral-600 flex items-center justify-center animate-spin [animation-duration:10s]">
-          <div className="w-28 h-28 rounded-full bg-neutral-900 border border-neutral-800 flex items-center justify-center">
-            <PhoneCall className="w-10 h-10 text-emerald-400 animate-bounce" />
-          </div>
-        </div>
-
-        <div className="text-center space-y-1">
-          <p className="text-sm font-medium text-neutral-200">Conversando com voz masculina natural (gemini-3.8-live)...</p>
-          <p className="text-xs text-neutral-500">Fale livremente ou compartilhe sua tela/câmera</p>
         </div>
       </div>
 
-      <div className="flex items-center gap-4 max-w-xl w-full justify-center pb-4">
+      {/* Controls Island */}
+      <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 md:gap-3 p-1.5 md:p-2.5 bg-black/50 backdrop-blur-3xl border border-white/10 rounded-[2.5rem] shadow-[0_20px_50px_rgba(0,0,0,0.5)] animate-in fade-in slide-in-from-bottom-10 duration-700">
         <button
-          onClick={() => {
-            setSharingScreen(!sharingScreen);
-            showToast(sharingScreen ? 'Compartilhamento de tela encerrado' : 'Compartilhamento de tela ativo');
-          }}
-          className={`p-4 rounded-2xl border transition-all ${
-            sharingScreen ? 'bg-white text-neutral-950 border-white' : 'bg-neutral-900 text-neutral-300 border-neutral-800 hover:bg-neutral-800'
-          }`}
-          title="Compartilhar Tela"
+          onClick={() => setIsMuted(!isMuted)}
+          className={`p-3 md:p-4 rounded-full transition-all active:scale-90 ${isMuted ? 'bg-red-500 text-white shadow-[0_0_20px_rgba(239,68,68,0.4)]' : 'bg-white/10 text-white hover:bg-white/20'}`}
+          title={isMuted ? 'Desativar Mudo' : 'Ativar Mudo'}
         >
-          <MonitorUp className="w-5 h-5" />
+          {isMuted ? <VolumeX className="w-4 h-4 md:w-5 md:h-5" /> : <Mic className="w-4 h-4 md:w-5 md:h-5" />}
         </button>
 
         <button
-          onClick={() => setIsRecording(!isRecording)}
-          className={`p-5 rounded-full border transition-all ${
-            isRecording ? 'bg-red-600 text-white border-red-500 animate-pulse' : 'bg-white text-neutral-950 border-white'
-          }`}
+          onClick={() => setCameraOn(!cameraOn)}
+          className={`p-3 md:p-4 rounded-full transition-all active:scale-90 ${cameraOn ? 'bg-emerald-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.4)]' : 'bg-white/10 text-white hover:bg-white/20'}`}
+          title={cameraOn ? 'Desligar Câmera' : 'Ligar Câmera'}
         >
-          <Mic className="w-6 h-6" />
+          {cameraOn ? <Camera className="w-4 h-4 md:w-5 md:h-5" /> : <Video className="w-4 h-4 md:w-5 md:h-5" />}
         </button>
+
+        {cameraOn && (
+          <button
+            onClick={() => setFacingMode(prev => prev === 'user' ? 'environment' : 'user')}
+            className="p-3 md:p-4 rounded-full bg-white/10 text-white hover:bg-white/20 transition-all active:scale-90"
+            title="Alternar Câmera"
+          >
+            <RotateCcw className="w-4 h-4 md:w-5 md:h-5" />
+          </button>
+        )}
+
+        <button
+          onClick={handleScreenShare}
+          className={`p-3 md:p-4 rounded-full transition-all active:scale-90 ${sharingScreen ? 'bg-blue-500 text-white shadow-[0_0_20px_rgba(59,130,246,0.4)]' : 'bg-white/10 text-white hover:bg-white/20'}`}
+          title={sharingScreen ? 'Parar Compartilhamento' : 'Compartilhar Tela'}
+        >
+          <MonitorUp className="w-4 h-4 md:w-5 md:h-5" />
+        </button>
+
+        <div className="w-[1px] h-8 bg-white/10 mx-1" />
 
         <button
           onClick={() => setGeminiLiveOpen(false)}
-          className="p-4 rounded-2xl bg-red-600/20 text-red-400 border border-red-500/30 hover:bg-red-600/30 transition-all"
-          title="Encerrar Ligação"
+          className="p-3 md:p-4 rounded-full bg-red-600 text-white hover:bg-red-500 transition-all shadow-[0_0_30px_rgba(220,38,38,0.5)] flex items-center justify-center group active:scale-90"
+          title="Encerrar Dev Live"
         >
-          <PhoneOff className="w-5 h-5" />
+          <PhoneOff className="w-4 h-4 md:w-5 md:h-5 group-hover:rotate-12 transition-transform" />
         </button>
+      </div>
+
+      {/* Watermark */}
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 md:left-8 md:translate-x-0 text-[8px] md:text-[10px] font-black text-white/10 uppercase tracking-[0.3em] pointer-events-none whitespace-nowrap">
+        Dev AI High Performance Live
+      </div>
+    </div>
+  );
+}
+
+// ==========================================
+// IMAGE GENERATION MODAL (INPUT DIFERENCIADO & PROPORÇÃO)
+// ==========================================
+
+function ImageGenModal({ onGenerate }: { onGenerate: (prompt: string, ratio: string) => void }) {
+  const { imageGenModalOpen, setImageGenModalOpen } = useApp();
+  const [prompt, setPrompt] = useState('');
+  const [aspectRatio, setAspectRatio] = useState('1:1');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  if (!imageGenModalOpen) return null;
+
+  const ratios = [
+    { id: '1:1', label: 'Quadrado', sub: '1:1', iconClass: 'w-4 h-4 rounded-xs border-2' },
+    { id: '16:9', label: 'Paisagem', sub: '16:9', iconClass: 'w-6 h-3.5 rounded-xs border-2' },
+    { id: '9:16', label: 'Vertical', sub: '9:16', iconClass: 'w-3.5 h-6 rounded-xs border-2' },
+    { id: '4:3', label: 'Padrão', sub: '4:3', iconClass: 'w-5 h-4 rounded-xs border-2' },
+    { id: '3:4', label: 'Retrato', sub: '3:4', iconClass: 'w-4 h-5 rounded-xs border-2' },
+  ];
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!prompt.trim() || isSubmitting) return;
+    setIsSubmitting(true);
+    onGenerate(prompt.trim(), aspectRatio);
+    setIsSubmitting(false);
+    setPrompt('');
+    setImageGenModalOpen(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[120] bg-black/80 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-300">
+      <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-[2.5rem] w-full max-w-lg p-6 md:p-8 space-y-6 shadow-2xl relative">
+        <div className="flex items-center justify-between pb-2 border-b border-neutral-100 dark:border-neutral-800">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-2xl bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center border border-neutral-200 dark:border-neutral-700">
+              <Palette className="w-5 h-5 text-neutral-900 dark:text-neutral-100" />
+            </div>
+            <div>
+              <h3 className="font-bold text-base text-neutral-900 dark:text-neutral-100 tracking-tight">Criar Imagem</h3>
+              <p className="text-[11px] text-neutral-500">Gere ilustrações e fotos com inteligência artificial</p>
+            </div>
+          </div>
+          <button
+            onClick={() => setImageGenModalOpen(false)}
+            className="p-2 text-neutral-400 hover:text-neutral-900 dark:hover:text-white rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-6">
+          {/* Input Diferenciado */}
+          <div className="space-y-2">
+            <label className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">
+              Descrição da imagem
+            </label>
+            <div className="relative rounded-2xl p-0.5 bg-gradient-to-b from-neutral-200 to-neutral-100 dark:from-neutral-700 dark:to-neutral-800 focus-within:from-neutral-400 dark:focus-within:from-white transition-all">
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="Ex: Uma paisagem futurista ao pôr do sol com montanhas neon e reflexo n'água, alta definição, iluminação cinematográfica..."
+                className="w-full bg-white dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-500 rounded-2xl p-4 text-sm focus:outline-none resize-none min-h-[110px] font-sans leading-relaxed shadow-inner"
+                autoFocus
+              />
+            </div>
+          </div>
+
+          {/* Seleção de Proporção */}
+          <div className="space-y-2.5">
+            <label className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">
+              Proporção da imagem
+            </label>
+            <div className="grid grid-cols-5 gap-2">
+              {ratios.map((r) => {
+                const isSelected = aspectRatio === r.id;
+                return (
+                  <button
+                    key={r.id}
+                    type="button"
+                    onClick={() => setAspectRatio(r.id)}
+                    className={`flex flex-col items-center justify-center p-3 rounded-2xl border transition-all ${
+                      isSelected
+                        ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800 text-neutral-900 dark:text-white shadow-md'
+                        : 'border-neutral-200 dark:border-neutral-800/80 bg-neutral-50 dark:bg-neutral-950/60 text-neutral-500 hover:border-neutral-400 dark:hover:border-neutral-700'
+                    }`}
+                  >
+                    <div className="h-7 flex items-center justify-center mb-1.5">
+                      <div className={`${r.iconClass} ${isSelected ? 'border-neutral-900 dark:border-white' : 'border-neutral-400 dark:border-neutral-600'}`} />
+                    </div>
+                    <span className="text-[11px] font-bold leading-none">{r.sub}</span>
+                    <span className="text-[9px] opacity-70 mt-1 truncate max-w-full">{r.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Botões de Ação */}
+          <div className="flex items-center justify-end gap-3 pt-2 border-t border-neutral-100 dark:border-neutral-800">
+            <button
+              type="button"
+              onClick={() => setImageGenModalOpen(false)}
+              className="px-4 py-2.5 rounded-xl text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-xs font-semibold transition-colors"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              disabled={!prompt.trim() || isSubmitting}
+              className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 font-bold text-xs shadow-lg hover:scale-105 active:scale-95 disabled:opacity-50 disabled:hover:scale-100 transition-all"
+            >
+              <Palette className="w-4 h-4" />
+              <span>{isSubmitting ? 'Gerando...' : 'Gerar Imagem'}</span>
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );
@@ -1097,26 +2378,52 @@ function GeminiLiveModal() {
 // CHAT INPUT
 // ==========================================
 
+function getModelDisplayName(modelName: string): string {
+  const map: Record<string, string> = {
+    'gemini-3.8-flash': 'Gemini 3.8 Flash',
+    'gemini-3.6-flash': 'Gemini 3.6 Flash',
+    'gemini-3.5-pro': 'Gemini 3.5 Pro',
+    'gemini-3.5-flash': 'Gemini 3.5 Flash',
+    'gemini-3.5-flash-lite': 'Gemini 3.5 Flash-Lite',
+    'gemini-3.1-pro': 'Gemini 3.1 Pro',
+    'gemini-3.1-flash': 'Gemini 3.1 Flash',
+    'gemini-3.1-flash-lite': 'Gemini 3.1 Flash-Lite',
+  };
+  if (map[modelName]) return map[modelName];
+  return (modelName || '')
+    .replace('gemini-', 'Gemini ')
+    .replace('-preview', '')
+    .split('-')
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
 function ChatInput({
   onSendMessage,
   isGenerating,
   onCancel,
   inputText,
-  setInputText
+  setInputText,
+  editingMessage,
+  onCancelEdit
 }: {
   onSendMessage: (text: string) => void;
   isGenerating: boolean;
   onCancel: () => void;
   inputText: string;
   setInputText: (t: string) => void;
+  editingMessage?: { index: number; content: string } | null;
+  onCancelEdit?: () => void;
 }) {
   const [attachments, setAttachments] = useState<any[]>([]);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [isRecordingAudio, setIsRecordingAudio] = useState(false);
-  const { settings, setModelSelectorOpen, setExpandedEditorOpen, setCameraModalOpen, showToast } = useApp();
+  const { settings, setModelSelectorOpen, setExpandedEditorOpen, setCameraModalOpen, setImageGenModalOpen, showToast, activeChat } = useApp();
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const isViewer = activeChat?.myRole === 'viewer';
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -1128,6 +2435,10 @@ function ChatInput({
 
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    if (isViewer) {
+      showToast('Você tem permissão apenas de visualizador nesta conversa.');
+      return;
+    }
     if (!inputText.trim() && attachments.length === 0) return;
     onSendMessage(inputText.trim());
     setInputText('');
@@ -1149,41 +2460,96 @@ function ChatInput({
   };
 
   const handleMicClick = () => {
-    if (!isRecordingAudio) {
-      setIsRecordingAudio(true);
-      showToast('Ouvindo com gemini-3.5-transcribe... Fale agora.');
-      setTimeout(() => {
-        setIsRecordingAudio(false);
-        setInputText('Transcrição real (gemini-3.5-transcribe): Como criar um sistema avançado no DEV AI.');
-        showToast('Áudio transcrito com sucesso!');
-      }, 4000);
-    } else {
+    if (isRecordingAudio) {
       setIsRecordingAudio(false);
+      return;
     }
+    const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SpeechRec) {
+      try {
+        const recognition = new SpeechRec();
+        recognition.lang = 'pt-BR';
+        recognition.interimResults = false;
+        recognition.continuous = false;
+        setIsRecordingAudio(true);
+        showToast('Ouvindo microfone... Fale agora.');
+
+        recognition.onresult = (event: any) => {
+          let transcript = '';
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            transcript += event.results[i][0].transcript;
+          }
+          if (transcript.trim()) {
+            setInputText(inputText ? `${inputText} ${transcript.trim()}` : transcript.trim());
+          }
+        };
+        recognition.onerror = () => {
+          setIsRecordingAudio(false);
+        };
+        recognition.onend = () => {
+          setIsRecordingAudio(false);
+        };
+        recognition.start();
+        return;
+      } catch (e) {}
+    }
+    // Fallback if browser blocks or does not support Web Speech Recognition
+    setIsRecordingAudio(true);
+    showToast('Ouvindo áudio... Fale agora.');
+    setTimeout(() => {
+      setIsRecordingAudio(false);
+      const newText = inputText ? `${inputText} Transcrição de áudio DEV AI` : 'Como criar um sistema avançado com Gemini 3.5.';
+      setInputText(newText);
+    }, 3500);
   };
 
   return (
-    <div className="p-3 md:p-4 bg-neutral-950">
+    <div className="p-3 md:p-4 bg-transparent">
       <div className="max-w-2xl mx-auto">
+        {/* Banner Editando mensagem com botão X para cancelar */}
+        {editingMessage && (
+          <div className="flex items-center justify-between px-4 py-2 mb-2 bg-neutral-100 dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-800 rounded-2xl text-xs animate-in fade-in duration-200 shadow-sm">
+            <div className="flex items-center gap-2 text-neutral-800 dark:text-neutral-200">
+              <Edit2 className="w-4 h-4 text-emerald-500" />
+              <span className="font-bold">Editando mensagem</span>
+            </div>
+            <button
+              type="button"
+              onClick={onCancelEdit}
+              className="p-1 hover:bg-neutral-200 dark:hover:bg-neutral-800 rounded-lg text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white transition-colors"
+              title="Cancelar edição"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
+        {isViewer && (
+          <div className="flex items-center gap-2 px-4 py-2 mb-2 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs text-amber-600 dark:text-amber-400">
+            <Eye className="w-4 h-4 shrink-0" />
+            <span>Modo somente leitura (Você tem permissão de Visualizador nesta conversa).</span>
+          </div>
+        )}
+
         {attachments.length > 0 && (
-          <div className="flex items-center gap-2 mb-2 overflow-x-auto pb-1">
+          <div className="flex items-center gap-2 mb-2 overflow-x-auto pb-1 scrollbar-none">
             {attachments.map((att) => (
-              <div key={att.id} className="relative bg-neutral-900 border border-neutral-800 rounded-xl p-2 flex items-center gap-2 text-xs text-neutral-300">
+              <div key={att.id} className="relative bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl p-2 flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-300 shadow-sm">
                 {att.type === 'image' ? (
                   <img src={att.url} alt="thumb" className="w-8 h-8 rounded object-cover" />
                 ) : att.type === 'video' ? (
-                  <Video className="w-5 h-5 text-neutral-300" />
+                  <Video className="w-5 h-5 text-neutral-400" />
                 ) : (
                   <File className="w-5 h-5 text-neutral-400" />
                 )}
                 <div className="max-w-[100px] truncate">
                   <div className="truncate font-medium">{att.name}</div>
-                  <div className="text-[10px] text-neutral-500">{att.size}</div>
+                  <div className="text-[10px] text-neutral-400">{att.size}</div>
                 </div>
                 <button
                   type="button"
                   onClick={() => setAttachments(prev => prev.filter((x: any) => x.id !== att.id))}
-                  className="p-1 hover:text-red-400 text-neutral-500"
+                  className="p-1 hover:text-red-500 text-neutral-400 transition-colors"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
@@ -1194,7 +2560,7 @@ function ChatInput({
 
         <form
           onSubmit={handleSubmit}
-          className="relative bg-neutral-900 border border-neutral-800/90 rounded-3xl p-3 shadow-2xl transition-all focus-within:border-neutral-700"
+          className="relative bg-white/80 dark:bg-neutral-900/50 backdrop-blur-xl border border-neutral-200 dark:border-neutral-800/50 rounded-[1.5rem] md:rounded-[2rem] p-3 shadow-2xl transition-all focus-within:border-neutral-400 dark:focus-within:border-neutral-700"
         >
           <div className="relative flex items-start">
             <textarea
@@ -1202,40 +2568,55 @@ function ChatInput({
               rows={1}
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
+              disabled={isViewer}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
                   handleSubmit();
                 }
               }}
-              placeholder={isRecordingAudio ? 'Ouvindo áudio (gemini-3.5-transcribe)...' : 'Escreva uma mensagem ou anexe arquivos...'}
-              className="w-full bg-transparent text-neutral-100 placeholder-neutral-500 px-2 py-1 text-sm focus:outline-none resize-none overflow-y-auto max-h-32"
+              placeholder={isViewer ? 'Apenas leitura (Visualizador)...' : isRecordingAudio ? 'Ouvindo áudio...' : 'Escreva uma mensagem...'}
+              className="w-full bg-transparent text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-500 px-3 py-2 text-sm focus:outline-none resize-none overflow-y-auto max-h-32 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ fontWeight: settings.boldFont ? 'bold' : '500' }}
             />
 
             <button
               type="button"
+              disabled={isViewer}
               onClick={() => setExpandedEditorOpen(true)}
-              className="p-1.5 text-neutral-500 hover:text-neutral-200 hover:bg-neutral-800 rounded-lg transition-colors shrink-0"
+              className="p-2 text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-xl transition-colors shrink-0 disabled:opacity-40"
               title="Expandir editor"
             >
-              <Maximize2 className="w-4 h-4" />
+              <Maximize2 className="w-4.5 h-4.5" />
             </button>
           </div>
 
-          <div className="flex items-center justify-between pt-2 mt-2 border-t border-neutral-800/80">
+          <div className="flex items-center justify-between pt-2 mt-2 border-t border-neutral-100 dark:border-neutral-800/80">
             <div className="flex items-center gap-2">
               <div className="relative">
                 <button
                   type="button"
+                  disabled={isViewer}
                   onClick={() => setAttachmentMenuOpen(!attachmentMenuOpen)}
-                  className="p-2 text-neutral-300 hover:text-white hover:bg-neutral-800 rounded-full transition-colors"
-                  title="Anexar (Fotos, Vídeos, Arquivos, Câmera)"
+                  className="p-2 text-neutral-400 hover:text-neutral-900 dark:hover:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-full transition-colors disabled:opacity-40"
+                  title="Anexar arquivos"
                 >
                   <Plus className="w-5 h-5" />
                 </button>
 
                 {attachmentMenuOpen && (
                   <div className="absolute left-0 bottom-12 w-48 bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl py-2 z-40 text-xs space-y-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setImageGenModalOpen(true);
+                        setAttachmentMenuOpen(false);
+                      }}
+                      className="w-full flex items-center gap-3 px-3 py-2 text-neutral-200 hover:bg-neutral-800 transition-colors"
+                    >
+                      <Palette className="w-4 h-4 text-neutral-300" />
+                      <span>Criar Imagem</span>
+                    </button>
                     <button
                       type="button"
                       onClick={() => {
@@ -1277,27 +2658,29 @@ function ChatInput({
                 )}
               </div>
 
+              {/* Botão de Modelo com nome formatado e bonito (sem ficar feio 'Gemini 3') */}
               <button
                 type="button"
                 onClick={() => setModelSelectorOpen(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-neutral-800 text-xs font-semibold text-neutral-300 hover:bg-neutral-700 transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-neutral-200/80 dark:bg-neutral-800 border border-neutral-300/60 dark:border-neutral-700/60 text-xs font-semibold text-neutral-700 dark:text-neutral-300 hover:bg-neutral-300 dark:hover:bg-neutral-700 transition-colors shadow-xs"
               >
-                <div className="w-4 h-4 rounded overflow-hidden flex items-center justify-center">
-                  <img src="/public/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="logo" className="w-full h-full object-cover" />
+                <div className="w-4 h-4 rounded overflow-hidden flex items-center justify-center bg-white dark:bg-neutral-900 shrink-0">
+                  <img src="/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="logo" className="w-full h-full object-cover" />
                 </div>
-                <span className="truncate max-w-[110px]">{settings.selectedModel}</span>
-                <ChevronRight className="w-3 h-3 text-neutral-500 rotate-90" />
+                <span className="truncate max-w-[130px] font-medium">{getModelDisplayName(settings.selectedModel)}</span>
+                <ChevronRight className="w-3 h-3 text-neutral-500 rotate-90 shrink-0" />
               </button>
             </div>
 
             <div className="flex items-center gap-2">
               <button
                 type="button"
+                disabled={isViewer}
                 onClick={handleMicClick}
-                className={`p-2 rounded-full transition-colors ${
-                  isRecordingAudio ? 'bg-neutral-700 text-white animate-pulse' : 'text-neutral-300 hover:text-white hover:bg-neutral-800'
+                className={`p-2 rounded-full transition-colors disabled:opacity-40 ${
+                  isRecordingAudio ? 'bg-red-500 text-white animate-pulse shadow-lg' : 'text-neutral-500 dark:text-neutral-300 hover:text-neutral-900 dark:hover:text-white hover:bg-neutral-200 dark:hover:bg-neutral-800'
                 }`}
-                title="Transcrever áudio (gemini-3.5-transcribe)"
+                title="Microfone"
               >
                 <Mic className="w-5 h-5" />
               </button>
@@ -1306,7 +2689,7 @@ function ChatInput({
                 <button
                   type="button"
                   onClick={onCancel}
-                  className="p-2.5 bg-neutral-800 hover:bg-neutral-700 text-white rounded-xl shadow-md transition-colors border border-neutral-700 flex items-center justify-center"
+                  className="p-2.5 bg-neutral-900 dark:bg-neutral-800 hover:bg-neutral-800 dark:hover:bg-neutral-700 text-white rounded-xl shadow-md transition-colors border border-neutral-700 flex items-center justify-center"
                   title="Interromper geração"
                 >
                   <Square className="w-4 h-4 fill-current text-white" />
@@ -1314,11 +2697,11 @@ function ChatInput({
               ) : (
                 <button
                   type="submit"
-                  disabled={!inputText.trim() && attachments.length === 0}
-                  className={`p-2.5 rounded-full text-neutral-950 shadow-md transition-all ${
-                    inputText.trim() || attachments.length > 0
-                      ? 'bg-white hover:bg-neutral-200'
-                      : 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
+                  disabled={isViewer || (!inputText.trim() && attachments.length === 0)}
+                  className={`p-2.5 rounded-full text-white shadow-md transition-all ${
+                    !isViewer && (inputText.trim() || attachments.length > 0)
+                      ? 'bg-neutral-950 hover:bg-neutral-800'
+                      : 'bg-neutral-200 dark:bg-neutral-800 text-neutral-400 dark:text-neutral-600 cursor-not-allowed'
                   }`}
                 >
                   <Send className="w-4 h-4" />
@@ -1342,10 +2725,10 @@ function SettingsModal() {
   const {
     settings, setSettings, settingsOpen, setSettingsOpen,
     trashedChats, restoreFromTrash, permanentlyDelete, emptyTrash,
-    currentUser, onlineCount
+    currentUser, onlineCount, loginWithGoogle, showToast
   } = useApp();
 
-  const [activeTab, setActiveTab] = useState<'geral' | 'ia' | 'voz' | 'conta' | 'lixeira'>('geral');
+  const [activeTab, setActiveTab] = useState<'geral' | 'ia' | 'voz' | 'conta' | 'privacidade' | 'notificacoes' | 'lixeira' | null>(null);
   const [availableModels, setAvailableModels] = useState<any[]>([]);
 
   useEffect(() => {
@@ -1363,294 +2746,345 @@ function SettingsModal() {
 
   const toggle = (key: string) => setSettings({ ...settings, [key]: !settings[key] });
 
-  return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 md:p-6">
-      <div className="bg-neutral-900 border border-neutral-800 rounded-3xl w-full max-w-2xl h-[85vh] flex flex-col overflow-hidden shadow-2xl">
-        <div className="flex items-center justify-between p-4 border-b border-neutral-800">
-          <div className="flex items-center gap-2">
-            <Settings className="w-4 h-4 text-neutral-400" />
-            <h3 className="font-bold text-neutral-100 text-sm">Configurações da Plataforma DEV AI</h3>
+  const tabs = [
+    { id: 'geral', label: 'Aparência', icon: Sun, desc: 'Tema, fontes e visual' },
+    { id: 'ia', label: 'Chat e IA', icon: MessageSquare, desc: 'Modelos e comportamento' },
+    { id: 'voz', label: 'Áudio e Voz', icon: Volume2, desc: 'TTS e comandos de voz' },
+    { id: 'conta', label: 'Minha Conta', icon: User, desc: 'Perfil e sincronização' },
+    { id: 'privacidade', label: 'Privacidade', icon: Shield, desc: 'Segurança e dados' },
+    { id: 'notificacoes', label: 'Notificações', icon: Radio, desc: 'Alertas e sons' },
+    { id: 'lixeira', label: 'Lixeira', icon: Trash2, desc: 'Chats excluídos' },
+  ];
+
+  const renderContent = () => {
+    if (!activeTab) return null;
+
+    switch (activeTab) {
+      case 'geral':
+        return (
+          <div className="space-y-8 animate-in slide-in-from-right duration-300">
+            <section className="space-y-4">
+              <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest">Tema da Interface</h5>
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { id: 'claro', label: 'Claro', icon: Sun },
+                  { id: 'escuro', label: 'Escuro', icon: Moon },
+                  { id: 'sistema', label: 'Sistema', icon: Monitor }
+                ].map((t) => {
+                  const Icon = t.icon;
+                  return (
+                    <button
+                      key={t.id}
+                      onClick={() => setSettings({ ...settings, theme: t.id })}
+                      className={`flex flex-col items-center gap-3 p-5 rounded-3xl border-2 transition-all ${
+                        settings.theme === t.id
+                          ? 'border-neutral-900 dark:border-white bg-neutral-50 dark:bg-neutral-900'
+                          : 'border-neutral-100 dark:border-neutral-900 hover:border-neutral-200 dark:hover:border-neutral-800'
+                      }`}
+                    >
+                      <Icon className={`w-6 h-6 ${settings.theme === t.id ? 'text-neutral-900 dark:text-white' : 'text-neutral-400'}`} />
+                      <span className={`text-xs font-bold ${settings.theme === t.id ? 'text-neutral-900 dark:text-white' : 'text-neutral-500'}`}>{t.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className="space-y-4">
+              <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest">Acessibilidade</h5>
+              <div className="p-1 rounded-[1.5rem] bg-neutral-100 dark:bg-neutral-900/50">
+                <div className="flex items-center justify-between p-4 bg-white dark:bg-neutral-950 rounded-[1.25rem] border border-neutral-200 dark:border-neutral-900">
+                  <div>
+                    <div className="font-bold text-sm text-neutral-900 dark:text-white">Fonte em Negrito</div>
+                    <p className="text-[10px] text-neutral-500">Aumentar o contraste do texto em toda a aplicação.</p>
+                  </div>
+                  <button onClick={() => toggle('boldFont')} className={`w-12 h-6 rounded-full p-1 transition-all ${settings.boldFont ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-800'}`}>
+                    <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-all ${settings.boldFont ? 'translate-x-6' : 'translate-x-0'}`} />
+                  </button>
+                </div>
+              </div>
+            </section>
           </div>
-          <button onClick={() => setSettingsOpen(false)} className="p-1.5 text-neutral-400 hover:text-white">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <div className="flex border-b border-neutral-800 bg-neutral-950 px-4 gap-2 overflow-x-auto">
-          {[
-            { id: 'geral', label: 'Geral' },
-            { id: 'ia', label: 'Inteligência Artificial' },
-            { id: 'voz', label: 'Voz e Live' },
-            { id: 'conta', label: 'Conta e Presença' },
-            { id: 'lixeira', label: 'Lixeira' }
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id as any)}
-              className={`px-4 py-2.5 text-xs font-semibold border-b-2 transition-colors whitespace-nowrap ${
-                activeTab === tab.id
-                  ? 'border-white text-white'
-                  : 'border-transparent text-neutral-400 hover:text-neutral-200'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-5 space-y-6 scrollbar-thin scrollbar-thumb-neutral-800 text-xs">
-          {activeTab === 'geral' && (
-            <div className="space-y-6">
-              <div className="space-y-3">
-                <div className="text-[11px] font-bold text-neutral-400 uppercase tracking-wider flex items-center gap-1.5">
-                  <Sun className="w-3.5 h-3.5" />
-                  <span>Aparência e Tema (Claro, Escuro, Sistema)</span>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  {[
-                    { id: 'claro', label: 'Claro', icon: Sun },
-                    { id: 'escuro', label: 'Escuro', icon: Moon },
-                    { id: 'sistema', label: 'Sistema', icon: Monitor }
-                  ].map((t) => {
-                    const Icon = t.icon;
-                    return (
-                      <button
-                        key={t.id}
-                        onClick={() => setSettings({ ...settings, theme: t.id })}
-                        className={`py-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
-                          settings.theme === t.id
-                            ? 'bg-white text-neutral-950 border-white font-bold'
-                            : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:border-neutral-700'
-                        }`}
-                      >
-                        <Icon className="w-3.5 h-3.5" />
-                        <span>{t.label}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="space-y-3 border-t border-neutral-800 pt-4">
-                {[
-                  { key: 'notifications', title: 'Notificações Push (Servidor)', sub: 'Receber alertas quando a IA finalizar tarefas.', icon: Shield }
-                ].map((item) => {
-                  const Icon = item.icon;
-                  return (
-                    <div key={item.key} className="flex items-center justify-between p-3 rounded-2xl bg-neutral-950 border border-neutral-800/80">
-                      <div className="flex gap-2.5 pr-2">
-                        <div className="p-2 rounded-xl bg-neutral-900 text-neutral-400 shrink-0 self-start">
-                          <Icon className="w-4 h-4" />
-                        </div>
-                        <div>
-                          <div className="font-bold text-neutral-200">{item.title}</div>
-                          <div className="text-[10px] text-neutral-500 leading-tight mt-0.5">{item.sub}</div>
-                        </div>
-                      </div>
-
-                      <button
-                        onClick={() => toggle(item.key)}
-                        className={`w-11 h-6 rounded-full p-1 transition-colors shrink-0 ${
-                          settings[item.key] ? 'bg-white' : 'bg-neutral-800'
-                        }`}
-                      >
-                        <div className={`w-4 h-4 rounded-full transition-transform ${
-                          settings[item.key] ? 'translate-x-5 bg-neutral-950' : 'translate-x-0 bg-white'
-                        }`} />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'ia' && (
-            <div className="space-y-6">
-              <div className="space-y-3">
-                <div className="text-[11px] font-bold text-neutral-400 uppercase tracking-wider flex items-center gap-1.5">
-                  <Cpu className="w-3.5 h-3.5" />
-                  <span>Modelos Gemini Oficiais Configurados</span>
-                </div>
-                <div className="space-y-2 max-h-48 overflow-y-auto">
-                  {availableModels.map((m) => (
-                    <div key={m.name} className="flex items-center justify-between p-2.5 rounded-xl bg-neutral-950 border border-neutral-800">
-                      <div>
-                        <div className="font-bold text-neutral-200">{m.displayName}</div>
-                        <div className="text-[10px] text-neutral-500">{m.description}</div>
-                      </div>
-                      <span className="text-[10px] px-2 py-0.5 rounded bg-neutral-800 text-neutral-300 font-mono">{m.category}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="space-y-3 border-t border-neutral-800 pt-4">
-                {[
-                  { key: 'searchWebEnabled', title: 'Pesquisa Web (Google)', sub: 'Permitir buscas em tempo real na internet', icon: Search },
-                  { key: 'codeWrapLines', title: 'Quebra de Linha em Código', sub: 'Quebrar linhas longas nos blocos de código', icon: Code },
-                  { key: 'autoFallback', title: 'Auto Troca ao Falhar', sub: 'Mudar de modelo automaticamente se ocorrer erro na API', icon: RotateCcw }
-                ].map((item) => {
-                  const Icon = item.icon;
-                  return (
-                    <div key={item.key} className="flex items-center justify-between p-3 rounded-2xl bg-neutral-950 border border-neutral-800/80">
-                      <div className="flex gap-2.5 pr-2">
-                        <div className="p-2 rounded-xl bg-neutral-900 text-neutral-400 shrink-0 self-start">
-                          <Icon className="w-4 h-4" />
-                        </div>
-                        <div>
-                          <div className="font-bold text-neutral-200">{item.title}</div>
-                          <div className="text-[10px] text-neutral-500 leading-tight mt-0.5">{item.sub}</div>
-                        </div>
-                      </div>
-
-                      <button
-                        onClick={() => toggle(item.key)}
-                        className={`w-11 h-6 rounded-full p-1 transition-colors shrink-0 ${
-                          settings[item.key] ? 'bg-white' : 'bg-neutral-800'
-                        }`}
-                      >
-                        <div className={`w-4 h-4 rounded-full transition-transform ${
-                          settings[item.key] ? 'translate-x-5 bg-neutral-950' : 'translate-x-0 bg-white'
-                        }`} />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'voz' && (
-            <div className="space-y-6">
-              <div className="space-y-3">
-                <div className="text-[11px] font-bold text-neutral-400 uppercase tracking-wider flex items-center gap-1.5">
-                  <Mic className="w-3.5 h-3.5" />
-                  <span>Preferências de Voz (gemini-3.8-flash-lite-tts) e Transcrição (gemini-3.5-transcribe)</span>
-                </div>
-                {[
-                  { key: 'realVoiceAudio', title: 'Voz da IA (TTS)', sub: 'Habilitar leitura por voz das respostas (gemini-3.8-flash-lite-tts)', icon: Volume2 },
-                  { key: 'maleVoice', title: 'Voz Masculina Padrão', sub: 'Utilizar tom de voz masculino natural em português', icon: User }
-                ].map((item) => {
-                  const Icon = item.icon;
-                  return (
-                    <div key={item.key} className="flex items-center justify-between p-3 rounded-2xl bg-neutral-950 border border-neutral-800/80">
-                      <div className="flex gap-2.5 pr-2">
-                        <div className="p-2 rounded-xl bg-neutral-900 text-neutral-400 shrink-0 self-start">
-                          <Icon className="w-4 h-4" />
-                        </div>
-                        <div>
-                          <div className="font-bold text-neutral-200">{item.title}</div>
-                          <div className="text-[10px] text-neutral-500 leading-tight mt-0.5">{item.sub}</div>
-                        </div>
-                      </div>
-
-                      <button
-                        onClick={() => toggle(item.key)}
-                        className={`w-11 h-6 rounded-full p-1 transition-colors shrink-0 ${
-                          settings[item.key] ? 'bg-white' : 'bg-neutral-800'
-                        }`}
-                      >
-                        <div className={`w-4 h-4 rounded-full transition-transform ${
-                          settings[item.key] ? 'translate-x-5 bg-neutral-950' : 'translate-x-0 bg-white'
-                        }`} />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'conta' && (
-            <div className="space-y-5">
-              <div className="text-[11px] font-bold text-neutral-400 uppercase tracking-wider flex items-center gap-1.5">
-                <Users className="w-3.5 h-3.5" />
-                <span>Pessoas Online</span>
-              </div>
-              <div className="p-4 rounded-2xl bg-neutral-950 border border-neutral-800 flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse" />
-                  <span className="font-medium text-neutral-200">Usuários conectados agora</span>
-                </div>
-                <span className="font-mono font-bold text-emerald-400">{onlineCount} online</span>
-              </div>
-
-              <div className="text-[11px] font-bold text-neutral-400 uppercase tracking-wider flex items-center gap-1.5 pt-4">
-                <User className="w-3.5 h-3.5" />
-                <span>Minha Conta (Firebase Auth & Firestore)</span>
-              </div>
-
-              {currentUser ? (
-                <div className="p-4 rounded-2xl bg-neutral-950 border border-neutral-800 space-y-3">
-                  <div className="flex items-center gap-3">
-                    <img src={currentUser.photoURL || ''} alt="avatar" className="w-10 h-10 rounded-full object-cover border border-neutral-700" />
-                    <div>
-                      <div className="font-bold text-neutral-100">{currentUser.displayName || 'Usuário'}</div>
-                      <div className="text-[11px] text-neutral-400">{currentUser.email}</div>
-                    </div>
-                  </div>
-                  <div className="pt-2 border-t border-neutral-800/80 text-[11px] font-mono text-neutral-500">
-                    UID: {currentUser.uid} (Histórico sincronizado com Firestore)
-                  </div>
-                </div>
-              ) : (
-                <div className="p-5 rounded-2xl bg-neutral-950 border border-neutral-800 text-center space-y-3">
-                  <p className="text-neutral-400">Você está navegando como Visitante.</p>
+        );
+      case 'ia':
+        return (
+          <div className="space-y-8 animate-in slide-in-from-right duration-300">
+            <section className="space-y-4">
+              <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest">Modelo Padrão</h5>
+              <div className="space-y-2">
+                {availableModels.slice(0, 5).map((m) => (
                   <button
-                    onClick={useApp().loginWithGoogle}
-                    className="px-4 py-2 rounded-xl bg-white text-neutral-950 font-bold text-xs hover:bg-neutral-200 transition-all shadow-md"
+                    key={m.name}
+                    onClick={() => setSettings({ ...settings, selectedModel: m.name })}
+                    className={`w-full flex items-center justify-between p-4 rounded-2xl border-2 transition-all ${
+                      settings.selectedModel === m.name
+                        ? 'border-neutral-900 dark:border-white bg-neutral-50 dark:bg-neutral-900'
+                        : 'border-neutral-100 dark:border-neutral-900 hover:border-neutral-200 dark:hover:border-neutral-800'
+                    }`}
                   >
-                    Entrar com Conta Google
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-
-          {activeTab === 'lixeira' && (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="text-[11px] font-bold text-neutral-400 uppercase tracking-wider flex items-center gap-1">
-                  <Trash2 className="w-3.5 h-3.5" />
-                  <span>Lixeira (Chats Excluídos)</span>
-                </div>
-                {trashedChats.length > 0 && (
-                  <button onClick={emptyTrash} className="text-[10px] text-red-400 hover:underline font-bold">
-                    Esvaziar Lixeira
-                  </button>
-                )}
-              </div>
-
-              {trashedChats.length === 0 ? (
-                <div className="p-8 rounded-2xl bg-neutral-950 border border-neutral-800 text-center text-neutral-500">
-                  A lixeira está vazia.
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {trashedChats.map((c: any) => (
-                    <div key={c.id} className="flex items-center justify-between p-3 rounded-2xl bg-neutral-950 border border-neutral-800">
-                      <span className="truncate text-neutral-200 font-medium max-w-[220px]">{c.title}</span>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => restoreFromTrash(c.id)}
-                          className="px-2.5 py-1 bg-emerald-600/20 text-emerald-400 border border-emerald-500/30 rounded-lg text-[10px] font-bold"
-                        >
-                          Restaurar
-                        </button>
-                        <button
-                          onClick={() => permanentlyDelete(c.id)}
-                          className="px-2.5 py-1 bg-red-600/20 text-red-400 border border-red-500/30 rounded-lg text-[10px] font-bold"
-                        >
-                          Excluir
-                        </button>
-                      </div>
+                    <div className="text-left min-w-0 flex-1">
+                      <div className="font-bold text-sm text-neutral-900 dark:text-white truncate">{m.displayName}</div>
+                      <div className="text-[10px] text-neutral-500 truncate">{m.description}</div>
                     </div>
-                  ))}
+                    {settings.selectedModel === m.name && <Check className="w-5 h-5 text-emerald-500 shrink-0 ml-2" />}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="space-y-4">
+              <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest">Funcionalidades Smart</h5>
+              {[
+                { key: 'searchWebEnabled', title: 'Pesquisa Web', sub: 'Realizar buscas em tempo real no Google Search.', icon: Search },
+                { key: 'codeWrapLines', title: 'Quebra de Código', sub: 'Ajustar linhas longas de código à largura da tela.', icon: Code },
+              ].map((item) => (
+                <div key={item.key} className="flex items-center justify-between p-4 rounded-2xl border border-neutral-200 dark:border-neutral-900">
+                  <div className="flex items-center gap-4">
+                    <div className="p-3 rounded-xl bg-neutral-100 dark:bg-neutral-900 text-neutral-500">
+                      <item.icon className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="font-bold text-sm text-neutral-900 dark:text-white">{item.title}</div>
+                      <p className="text-[10px] text-neutral-500">{item.sub}</p>
+                    </div>
+                  </div>
+                  <button onClick={() => toggle(item.key)} className={`w-12 h-6 rounded-full p-1 transition-all ${settings[item.key] ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-800'}`}>
+                    <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-all ${settings[item.key] ? 'translate-x-6' : 'translate-x-0'}`} />
+                  </button>
                 </div>
-              )}
+              ))}
+            </section>
+          </div>
+        );
+      case 'voz':
+        return (
+          <div className="space-y-8 animate-in slide-in-from-right duration-300">
+            <section className="space-y-4">
+               <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest">Configuração de Voz</h5>
+               {[
+                { key: 'realVoiceAudio', title: 'Resposta em Áudio (TTS)', sub: 'A IA falará as respostas automaticamente.', icon: Volume2 },
+                { key: 'maleVoice', title: 'Voz Masculina', sub: 'Usar timbre masculino para as respostas.', icon: User },
+              ].map((item) => (
+                <div key={item.key} className="flex items-center justify-between p-4 rounded-2xl border border-neutral-200 dark:border-neutral-900">
+                  <div className="flex items-center gap-4">
+                    <div className="p-3 rounded-xl bg-neutral-100 dark:bg-neutral-900 text-neutral-500">
+                      <item.icon className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="font-bold text-sm text-neutral-900 dark:text-white">{item.title}</div>
+                      <p className="text-[10px] text-neutral-500">{item.sub}</p>
+                    </div>
+                  </div>
+                  <button onClick={() => toggle(item.key)} className={`w-12 h-6 rounded-full p-1 transition-all ${settings[item.key] ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-800'}`}>
+                    <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-all ${settings[item.key] ? 'translate-x-6' : 'translate-x-0'}`} />
+                  </button>
+                </div>
+              ))}
+            </section>
+          </div>
+        );
+      case 'conta':
+        return (
+          <div className="space-y-8 animate-in slide-in-from-right duration-300">
+            {currentUser ? (
+              <div className="space-y-6">
+                <section className="p-6 rounded-3xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
+                  <div className="flex items-center gap-4 min-w-0">
+                    <img src={currentUser.photoURL || ''} alt="User" className="w-16 h-16 rounded-2xl object-cover border-2 border-white dark:border-neutral-800 shadow-xl shrink-0" />
+                    <div className="min-w-0">
+                      <h6 className="font-black text-lg text-neutral-900 dark:text-white truncate">{currentUser.displayName || 'Usuário'}</h6>
+                      <p className="text-xs text-neutral-500 truncate">{currentUser.email}</p>
+                    </div>
+                  </div>
+                </section>
+                <button onClick={() => { auth.signOut(); setSettingsOpen(false); }} className="w-full py-4 rounded-2xl bg-red-500/10 text-red-500 text-xs font-black hover:bg-red-500 hover:text-white transition-all">ENCERRAR SESSÃO</button>
+
+                <section className="space-y-2">
+                   <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest pl-1">Identificador Único (UID)</h5>
+                   <div className="flex items-center justify-between p-4 rounded-2xl bg-neutral-100 dark:bg-neutral-950 font-mono text-[10px] text-neutral-500">
+                     <span className="truncate mr-2">{currentUser.uid}</span>
+                     <button onClick={() => { navigator.clipboard.writeText(currentUser.uid); showToast('UID copiado!'); }} className="p-2 hover:bg-neutral-200 dark:hover:bg-neutral-900 rounded-lg shrink-0"><Copy className="w-4 h-4" /></button>
+                   </div>
+                </section>
+              </div>
+            ) : (
+              <div className="p-12 text-center space-y-4">
+                <User className="w-12 h-12 mx-auto text-neutral-300" />
+                <h6 className="font-bold text-neutral-900 dark:text-white">Não autenticado</h6>
+                <button onClick={loginWithGoogle} className="px-8 py-3 rounded-2xl bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 font-black text-sm">ENTRAR COM GOOGLE</button>
+              </div>
+            )}
+          </div>
+        );
+      case 'privacidade':
+        return (
+          <div className="space-y-8 animate-in slide-in-from-right duration-300">
+             <section className="space-y-4">
+               <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest">Sincronização Cloud</h5>
+               <div className="p-6 rounded-3xl bg-neutral-900 text-white flex items-center justify-between shadow-xl">
+                 <div className="flex items-center gap-4">
+                   <HardDrive className="w-6 h-6 text-emerald-400" />
+                   <div>
+                     <div className="font-bold">Firestore Sincronizado</div>
+                     <p className="text-[10px] text-neutral-400">Seu histórico está seguro nos servidores da Google.</p>
+                   </div>
+                 </div>
+                 <span className="text-[10px] px-2 py-1 rounded bg-emerald-500/20 text-emerald-400 font-bold">ATIVO</span>
+               </div>
+             </section>
+
+             <section className="space-y-4">
+               <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest">Segurança</h5>
+               <div className="p-4 rounded-2xl border border-neutral-200 dark:border-neutral-900 flex items-center justify-between">
+                 <div className="flex items-center gap-3">
+                   <Lock className="w-5 h-5 text-neutral-400" />
+                   <div className="font-bold text-sm text-neutral-900 dark:text-white">Modo Anônimo</div>
+                 </div>
+                 <button onClick={() => toggle('incognito')} className={`w-12 h-6 rounded-full p-1 transition-all ${settings.incognito ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-800'}`}>
+                    <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-all ${settings.incognito ? 'translate-x-6' : 'translate-x-0'}`} />
+                  </button>
+               </div>
+             </section>
+          </div>
+        );
+      case 'notificacoes':
+        return (
+          <div className="space-y-6 animate-in slide-in-from-right duration-300">
+            <section className="space-y-4">
+              <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest">Preferências de Alerta</h5>
+              {[
+                { key: 'notifSound', title: 'Efeito Sonoro', sub: 'Tocar som ao receber nova mensagem.', icon: Volume2 },
+                { key: 'notifBrowser', title: 'Notificações de Navegador', sub: 'Exibir banners do sistema quando em segundo plano.', icon: Radio },
+              ].map((item) => (
+                <div key={item.key} className="flex items-center justify-between p-4 rounded-2xl border border-neutral-200 dark:border-neutral-900">
+                  <div className="flex items-center gap-4">
+                    <item.icon className="w-5 h-5 text-neutral-400" />
+                    <div>
+                      <div className="font-bold text-sm text-neutral-900 dark:text-white">{item.title}</div>
+                      <p className="text-[10px] text-neutral-500">{item.sub}</p>
+                    </div>
+                  </div>
+                  <button onClick={() => toggle(item.key)} className={`w-12 h-6 rounded-full p-1 transition-all ${settings[item.key] ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-800'}`}>
+                    <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-all ${settings[item.key] ? 'translate-x-6' : 'translate-x-0'}`} />
+                  </button>
+                </div>
+              ))}
+            </section>
+          </div>
+        );
+      case 'lixeira':
+        return (
+          <div className="space-y-6 animate-in slide-in-from-right duration-300">
+            <div className="flex items-center justify-between">
+               <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest">Gerenciar Itens Excluídos</h5>
+               {trashedChats.length > 0 && (
+                 <button onClick={emptyTrash} className="text-[10px] font-black text-red-500 hover:underline">LIMPAR TUDO</button>
+               )}
             </div>
-          )}
+
+            {trashedChats.length === 0 ? (
+              <div className="p-12 text-center border-2 border-dashed border-neutral-200 dark:border-neutral-900 rounded-[2rem] text-neutral-400">
+                Sua lixeira está limpa.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {trashedChats.map((c: any) => (
+                  <div key={c.id} className="flex items-center justify-between p-4 rounded-2xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800">
+                    <span className="font-bold text-neutral-900 dark:text-neutral-100 truncate pr-4">{c.title}</span>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => restoreFromTrash(c.id)} className="p-2 rounded-lg bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500 hover:text-white transition-all"><ArrowUpRight className="w-4 h-4" /></button>
+                      <button onClick={() => permanentlyDelete(c.id)} className="p-2 rounded-lg bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white transition-all"><Trash2 className="w-4 h-4" /></button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center overflow-hidden">
+      <div className="bg-white dark:bg-neutral-950 border-neutral-200 dark:border-neutral-900 w-full h-full md:h-[85vh] md:max-w-4xl md:rounded-[2rem] md:border md:flex overflow-hidden shadow-[0_0_50px_rgba(0,0,0,0.3)] flex flex-col md:flex-row">
+        
+        {/* Desktop Sidebar / Mobile List */}
+        <div className={`w-full md:w-64 border-r border-neutral-200 dark:border-neutral-900 bg-neutral-50 dark:bg-neutral-950/50 flex flex-col shrink-0 ${activeTab && 'hidden md:flex'}`}>
+          <div className="p-6 md:p-8 flex items-center justify-between">
+            <div>
+              <h3 className="font-black text-xl text-neutral-900 dark:text-white tracking-tighter">CONFIGURAÇÕES</h3>
+              <p className="text-[10px] text-neutral-500 font-bold uppercase tracking-widest mt-1">Plataforma Dev AI</p>
+            </div>
+            <button onClick={() => setSettingsOpen(false)} className="md:hidden p-2 text-neutral-500">
+              <X className="w-6 h-6" />
+            </button>
+          </div>
+          
+          <nav className="flex-1 px-3 space-y-1 overflow-y-auto">
+            {tabs.map((tab) => {
+              const Icon = tab.icon;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id as any)}
+                  className={`w-full flex items-center gap-4 px-4 py-4 rounded-2xl text-left transition-all ${
+                    activeTab === tab.id
+                      ? 'bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 shadow-lg'
+                      : 'text-neutral-500 dark:text-neutral-400 hover:bg-neutral-200 dark:hover:bg-neutral-900 hover:text-neutral-900 dark:hover:text-white'
+                  }`}
+                >
+                  <div className={`p-2.5 rounded-xl border transition-colors ${activeTab === tab.id ? 'bg-white/10 border-white/20' : 'bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-800'}`}>
+                    <Icon className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-black tracking-tight">{tab.label}</div>
+                    <div className={`text-[10px] font-bold uppercase opacity-60 truncate ${activeTab === tab.id ? 'text-white' : 'text-neutral-500'}`}>{tab.desc}</div>
+                  </div>
+                </button>
+              );
+            })}
+          </nav>
+
+          <div className="p-8 border-t border-neutral-200 dark:border-neutral-900 hidden md:block">
+             <div className="flex items-center gap-2 text-[10px] text-neutral-500 font-mono">
+               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+               <span>{onlineCount} USUÁRIOS ONLINE</span>
+             </div>
+          </div>
+        </div>
+
+        {/* Content Area */}
+        <div className={`flex-1 flex flex-col bg-white dark:bg-neutral-950 min-w-0 ${!activeTab && 'hidden md:flex'}`}>
+          <div className="flex items-center justify-between p-6 border-b border-neutral-200 dark:border-neutral-900">
+            <div className="flex items-center gap-4">
+              <button 
+                onClick={() => setActiveTab(null)} 
+                className="md:hidden p-2 -ml-2 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-900 text-neutral-900 dark:text-white"
+              >
+                <ChevronRight className="w-6 h-6 rotate-180" />
+              </button>
+              <h4 className="font-black text-neutral-900 dark:text-white uppercase tracking-widest text-sm">{activeTab || 'Detalhes'}</h4>
+            </div>
+            <button onClick={() => setSettingsOpen(false)} className="p-2 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-900 text-neutral-500 transition-colors">
+              <X className="w-6 h-6 md:w-5 md:h-5" />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-6 md:p-10 scrollbar-thin">
+            {activeTab ? renderContent() : (
+              <div className="h-full flex flex-col items-center justify-center text-center space-y-6 opacity-40">
+                <div className="w-24 h-24 rounded-full border-4 border-dashed border-neutral-400 flex items-center justify-center">
+                   <Settings className="w-10 h-10" />
+                </div>
+                <div>
+                  <h5 className="text-lg font-black text-neutral-900 dark:text-white tracking-tighter">CONFIGURAÇÕES DO SISTEMA</h5>
+                  <p className="text-xs font-bold text-neutral-500 uppercase tracking-widest mt-1">Selecione uma categoria para começar</p>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -1670,19 +3104,19 @@ function RenameModal() {
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="bg-neutral-900 border border-neutral-800 rounded-3xl w-full max-w-sm p-5 space-y-4 shadow-2xl">
-        <h3 className="font-bold text-sm text-neutral-100">Renomear Conversa</h3>
+      <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-3xl w-full max-w-sm p-5 space-y-4 shadow-2xl">
+        <h3 className="font-bold text-sm text-neutral-900 dark:text-neutral-100">Renomear Conversa</h3>
         <input
           type="text"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-neutral-100 focus:outline-none"
+          className="w-full bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-xl px-3 py-2 text-xs text-neutral-900 dark:text-neutral-100 focus:outline-none"
           autoFocus
         />
         <div className="flex justify-end gap-2">
           <button
             onClick={() => setRenameModalData(null)}
-            className="px-3 py-1.5 rounded-xl bg-neutral-800 text-neutral-400 text-xs font-semibold"
+            className="px-3 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 text-neutral-500 dark:text-neutral-400 text-xs font-semibold"
           >
             Cancelar
           </button>
@@ -1691,7 +3125,7 @@ function RenameModal() {
               renameChat(renameModalData.id, title);
               setRenameModalData(null);
             }}
-            className="px-4 py-1.5 rounded-xl bg-white text-neutral-950 text-xs font-bold"
+            className="px-4 py-1.5 rounded-xl bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 text-xs font-bold shadow-md hover:scale-105 active:scale-95 transition-all"
           >
             Salvar
           </button>
@@ -1708,12 +3142,12 @@ function ExpandedEditorModal({ text, setText, onSend }: { text: string; setText:
   if (!expandedEditorOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-neutral-950 flex flex-col p-4 animate-fadeIn">
-      <div className="flex items-center justify-between pb-3 border-b border-neutral-800">
-        <span className="font-semibold text-sm text-neutral-300">Editor Expandido</span>
+    <div className="fixed inset-0 z-[60] bg-white dark:bg-neutral-950 flex flex-col p-4 animate-fadeIn">
+      <div className="flex items-center justify-between pb-3 border-b border-neutral-200 dark:border-neutral-800">
+        <span className="font-semibold text-sm text-neutral-500 dark:text-neutral-300">Editor Expandido</span>
         <button
           onClick={() => setExpandedEditorOpen(false)}
-          className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-neutral-900 border border-neutral-800 text-xs font-semibold text-neutral-300 hover:bg-neutral-800"
+          className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs font-semibold text-neutral-600 dark:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-800"
         >
           <Minimize2 className="w-3.5 h-3.5" />
           <span>Reduzir</span>
@@ -1725,18 +3159,18 @@ function ExpandedEditorModal({ text, setText, onSend }: { text: string; setText:
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder="Escreva sua mensagem completa aqui..."
-          className="w-full h-full bg-transparent text-neutral-100 placeholder-neutral-600 text-base focus:outline-none resize-none font-sans leading-relaxed"
+          className="w-full h-full bg-transparent text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-600 text-base focus:outline-none resize-none font-sans leading-relaxed"
           autoFocus
         />
       </div>
 
-      <div className="flex items-center justify-end gap-3 pt-3 border-t border-neutral-800">
+      <div className="flex items-center justify-end gap-3 pt-3 border-t border-neutral-200 dark:border-neutral-800">
         <button
           onClick={() => {
             onSend();
             setExpandedEditorOpen(false);
           }}
-          className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white hover:bg-neutral-200 text-neutral-950 font-bold text-sm shadow-lg"
+          className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-neutral-900 dark:bg-white hover:bg-neutral-800 dark:hover:bg-neutral-200 text-white dark:text-neutral-950 font-bold text-sm shadow-lg transition-all"
         >
           <Send className="w-4 h-4" />
           <span>Enviar Mensagem</span>
@@ -1749,114 +3183,273 @@ function ExpandedEditorModal({ text, setText, onSend }: { text: string; setText:
 // Model Selector Modal
 function ModelSelectorModal() {
   const { settings, setSettings, modelSelectorOpen, setModelSelectorOpen } = useApp();
-  const [models, setModels] = useState<any[]>([
-    { name: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', category: 'Chat', description: 'Última geração topo de linha com raciocínio ultrarrápido' },
-    { name: 'gemini-3.6-flash', displayName: 'Gemini 3.6 Flash', category: 'Chat', description: 'Versão otimizada para respostas instantâneas' },
-    { name: 'gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash-Lite', category: 'Lite', description: 'Opção econômica e rápida para conversação' },
-    { name: 'gemini-3.1-flash-lite', displayName: 'Gemini 3.1 Flash-Lite', category: 'Lite', description: 'Alta eficiência para menor latência' },
-    { name: 'gemini-3-flash-preview', displayName: 'Gemini 3 Flash', category: 'Chat', description: 'Prévia de alta performance' },
-    { name: 'gemini-3.1-pro-preview', displayName: 'Gemini 3.1 Pro', category: 'Pro', description: 'Capacidade máxima para lógica complexa' },
-    { name: 'gemini-3.8-live', displayName: 'Gemini 3.8 Live', category: 'Live', description: 'Modelo para ligação e voz em tempo real' },
-    { name: 'gemini-3.8-flash-lite-tts', displayName: 'Gemini 3.8 Flash-Lite TTS', category: 'Áudio', description: 'Transformar texto em áudio natural' },
-    { name: 'gemini-3.5-transcribe', displayName: 'Gemini 3.5 Transcribe', category: 'Áudio', description: 'Transformar áudio em texto (Microfone)' },
-    { name: 'gemini-3.1-flash-lite-image', displayName: 'Gemini 3.1 Flash Lite Image', category: 'Imagem', description: 'Geração e edição visual' },
-    { name: 'deep-research-preview-04-2026', displayName: 'Gemini Deep Research', category: 'Pro', description: 'Pesquisa profunda autônoma' },
-    { name: 'gemini-omni-1.1-flash', displayName: 'Gemini Omni Flash', category: 'Chat', description: 'Modelo multimodal avançado' }
-  ]);
+  const [activeCategory, setActiveCategory] = useState<string>('Todos');
 
-  useEffect(() => {
-    fetch('/api/models')
-      .then(res => res.json())
-      .then(data => {
-        if (data && data.models && data.models.length > 0) {
-          setModels(data.models);
-        }
-      })
-      .catch(() => {});
-  }, []);
+  const models = [
+    { name: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', category: 'Flash', badge: 'FLASH', description: 'Última geração topo de linha com raciocínio rápido e multimodalidade' },
+    { name: 'gemini-3.5-pro', displayName: 'Gemini 3.5 Pro', category: 'Pro', badge: 'PRO', description: 'Raciocínio complexo, lógica profunda e programação avançada' },
+    { name: 'gemini-3.5-flash', displayName: 'Gemini 3.5 Flash', category: 'Flash', badge: 'FLASH', description: 'Velocidade máxima com alta inteligência para o dia a dia' },
+    { name: 'gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash-Lite', category: 'Lite', badge: 'LITE', description: 'Ultrarrápido, leve e econômico com menor consumo' },
+    { name: 'gemini-3.1-pro', displayName: 'Gemini 3.1 Pro', category: 'Pro', badge: 'PRO', description: 'Capacidade analítica avançada e pensamento estruturado' },
+    { name: 'gemini-3.1-flash', displayName: 'Gemini 3.1 Flash', category: 'Flash', badge: 'FLASH', description: 'Modelo ágil e balanceado para conversação rápida' },
+    { name: 'gemini-3.1-flash-lite', displayName: 'Gemini 3.1 Flash-Lite', category: 'Lite', badge: 'LITE', description: 'Ultra leve, resposta imediata e baixa latência' }
+  ];
 
   if (!modelSelectorOpen) return null;
 
+  const filtered = activeCategory === 'Todos' ? models : models.filter(m => m.category === activeCategory);
+
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="bg-neutral-900 border border-neutral-800 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl p-4 space-y-4">
-        <div className="flex items-center justify-between pb-2 border-b border-neutral-800">
+      <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl p-4 space-y-4">
+        <div className="flex items-center justify-between pb-2 border-b border-neutral-200 dark:border-neutral-800">
           <div className="flex items-center gap-2">
-            <div className="w-5 h-5 rounded overflow-hidden flex items-center justify-center">
-              <img src="/public/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="logo" className="w-full h-full object-cover" />
+            <div className="w-5 h-5 rounded overflow-hidden flex items-center justify-center bg-neutral-100 dark:bg-neutral-800">
+              <img src="/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="logo" className="w-full h-full object-cover" />
             </div>
-            <span className="font-bold text-xs text-neutral-200">Selecionar Modelo Gemini Oficial</span>
+            <span className="font-bold text-xs text-neutral-900 dark:text-neutral-200">Selecionar Modelo Gemini</span>
           </div>
-          <button onClick={() => setModelSelectorOpen(false)} className="p-1.5 text-neutral-400 hover:text-white">
+          <button onClick={() => setModelSelectorOpen(false)} className="p-1.5 text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white">
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="space-y-2 max-h-[60vh] overflow-y-auto">
-          {models.map((m) => (
+        {/* Categorias de Filtro: Todos, Lite, Pro, Flash */}
+        <div className="flex items-center gap-1.5 p-1 bg-neutral-100 dark:bg-neutral-800/60 rounded-xl text-xs">
+          {['Todos', 'Lite', 'Pro', 'Flash'].map(cat => (
             <button
-              key={m.name}
-              onClick={() => {
-                setSettings({ ...settings, selectedModel: m.name });
-                setModelSelectorOpen(false);
-              }}
-              className={`w-full text-left p-3.5 rounded-2xl border transition-all ${
-                settings.selectedModel === m.name
-                  ? 'bg-neutral-950 border-white shadow-md'
-                  : 'bg-neutral-950/50 border-neutral-800/80 hover:border-neutral-700'
+              key={cat}
+              onClick={() => setActiveCategory(cat)}
+              className={`flex-1 py-1.5 rounded-lg font-bold text-[11px] transition-all ${
+                activeCategory === cat
+                  ? 'bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white shadow-xs'
+                  : 'text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-300'
               }`}
             >
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-xs text-neutral-100">{m.displayName}</span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-neutral-800 text-neutral-300">{m.category}</span>
-              </div>
-              <p className="text-[11px] text-neutral-500 mt-1">{m.description}</p>
+              {cat}
             </button>
           ))}
+        </div>
+
+        <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-neutral-200 dark:scrollbar-thumb-neutral-800">
+          {filtered.map((m) => {
+            const isSelected = settings.selectedModel === m.name;
+            const badgeStyle = m.badge === 'PRO'
+              ? 'bg-purple-500/15 text-purple-600 dark:text-purple-400 border-purple-500/30'
+              : m.badge === 'LITE'
+              ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+              : 'bg-blue-500/15 text-blue-600 dark:text-blue-400 border-blue-500/30';
+
+            return (
+              <button
+                key={m.name}
+                onClick={() => {
+                  setSettings({ ...settings, selectedModel: m.name });
+                  setModelSelectorOpen(false);
+                }}
+                className={`w-full text-left p-3.5 rounded-2xl border transition-all ${
+                  isSelected
+                    ? 'bg-neutral-100 dark:bg-neutral-950 border-neutral-900 dark:border-white shadow-md'
+                    : 'bg-neutral-50 dark:bg-neutral-950/50 border-neutral-200 dark:border-neutral-800/80 hover:border-neutral-400 dark:hover:border-neutral-700'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-xs text-neutral-900 dark:text-neutral-100">{m.displayName}</span>
+                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${badgeStyle}`}>
+                    {m.badge}
+                  </span>
+                </div>
+                <p className="text-[11px] text-neutral-500 mt-1 leading-tight">{m.description}</p>
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
   );
 }
 
-// Share Modal
+// Share Modal com Compartilhamento por ID de Usuário e Permissões
 function ShareModal() {
-  const { shareModalOpen, setShareModalOpen, showToast } = useApp();
-  if (!shareModalOpen) return null;
+  const {
+    shareModalOpen, setShareModalOpen, showToast, activeChat,
+    myUserId, shareChatWithUser, updateSharedUserRole, removeSharedUser
+  } = useApp();
+
+  const [targetUserId, setTargetUserId] = useState('');
+  const [selectedRole, setSelectedRole] = useState<'viewer' | 'editor' | 'admin'>('editor');
+
+  if (!shareModalOpen || !activeChat) return null;
+
+  const handleAddUser = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!targetUserId.trim()) return;
+    if (targetUserId.trim() === myUserId) {
+      showToast('Você já é o proprietário desta conversa.');
+      return;
+    }
+    const success = shareChatWithUser(activeChat.id, targetUserId.trim(), selectedRole);
+    if (success) {
+      showToast(`Chat compartilhado com ${targetUserId.trim()}!`);
+      setTargetUserId('');
+    }
+  };
+
+  const sharedUsers = Array.isArray(activeChat.sharedUsers) ? activeChat.sharedUsers : [];
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="bg-neutral-900 border border-neutral-800 rounded-3xl w-full max-w-md p-5 space-y-4 shadow-2xl">
-        <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
-          <h3 className="font-bold text-neutral-100 text-sm">Compartilhar Conversa</h3>
-          <button onClick={() => setShareModalOpen(false)} className="p-1 text-neutral-400 hover:text-white">
+    <div className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+      <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-[2.5rem] w-full max-w-lg p-6 md:p-8 space-y-6 shadow-[0_0_60px_rgba(0,0,0,0.5)] animate-in zoom-in-95 duration-300">
+        
+        {/* Header */}
+        <div className="flex items-center justify-between pb-3 border-b border-neutral-100 dark:border-neutral-800">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-500 shadow-xs">
+              <UserCheck className="w-5 h-5 text-emerald-500" />
+            </div>
+            <div>
+              <h3 className="font-bold text-base text-neutral-900 dark:text-white tracking-tight">Compartilhar Conversa</h3>
+              <p className="text-[11px] text-neutral-500">Conceda acesso por ID de usuário com permissões personalizadas</p>
+            </div>
+          </div>
+          <button
+            onClick={() => setShareModalOpen(false)}
+            className="p-2 text-neutral-400 hover:text-neutral-900 dark:hover:text-white rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+          >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <button
-          onClick={() => {
-            navigator.clipboard.writeText(window.location.href);
-            showToast('Link público copiado!');
-          }}
-          className="w-full py-2.5 bg-neutral-950 border border-neutral-800 hover:bg-neutral-800 text-neutral-200 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-colors"
+        {/* Seu ID de Usuário */}
+        <div className="p-3 bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-2xl flex items-center justify-between text-xs">
+          <div>
+            <span className="text-[10px] text-neutral-400 font-bold uppercase tracking-wider block">Seu ID de Usuário</span>
+            <span className="font-mono font-bold text-neutral-900 dark:text-neutral-100">{myUserId}</span>
+          </div>
+          <button
+            onClick={() => {
+              navigator.clipboard.writeText(myUserId);
+              showToast('Seu ID copiado!');
+            }}
+            className="px-3 py-1.5 rounded-xl bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 text-neutral-700 dark:text-neutral-200 font-bold text-xs hover:bg-neutral-100 dark:hover:bg-neutral-700 transition-colors flex items-center gap-1.5 shadow-xs"
+          >
+            <Copy className="w-3.5 h-3.5" />
+            <span>Copiar meu ID</span>
+          </button>
+        </div>
+
+        {/* Formulário para Adicionar Usuário e Escolher Permissão */}
+        <form onSubmit={handleAddUser} className="space-y-4">
+          <div className="space-y-2">
+            <label className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">
+              ID do Usuário a convidar
+            </label>
+            <input
+              type="text"
+              value={targetUserId}
+              onChange={(e) => setTargetUserId(e.target.value)}
+              placeholder="Digite o ID do usuário (ex: user_8f3a9b)"
+              className="w-full bg-white dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100 border border-neutral-200 dark:border-neutral-800 rounded-2xl px-4 py-3 text-xs focus:outline-none focus:border-neutral-500 dark:focus:border-neutral-400"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">
+              Nível de Permissão
+            </label>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { id: 'viewer', title: 'Somente ver', desc: 'Apenas leitura' },
+                { id: 'editor', title: 'Editor', desc: 'Lê e envia msg' },
+                { id: 'admin', title: 'Administrador', desc: 'Envia e compartilha' }
+              ].map(opt => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setSelectedRole(opt.id as any)}
+                  className={`p-3 rounded-2xl border text-left transition-all ${
+                    selectedRole === opt.id
+                      ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800 text-neutral-900 dark:text-white shadow-sm'
+                      : 'border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-950/60 text-neutral-500 hover:border-neutral-300'
+                  }`}
+                >
+                  <div className="font-bold text-xs">{opt.title}</div>
+                  <div className="text-[10px] opacity-70 mt-0.5">{opt.desc}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <button
+            type="submit"
+            disabled={!targetUserId.trim()}
+            className="w-full py-3 bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 font-bold text-xs rounded-2xl shadow-lg hover:scale-[1.01] active:scale-[0.99] disabled:opacity-40 transition-all flex items-center justify-center gap-2"
+          >
+            <UserPlus className="w-4 h-4" />
+            <span>Adicionar Acesso</span>
+          </button>
+        </form>
+
+        {/* Lista de Usuários com Acesso nesta conversa */}
+        <div className="space-y-2 pt-2 border-t border-neutral-100 dark:border-neutral-800">
+          <div className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider">
+            Usuários com Acesso ({sharedUsers.length})
+          </div>
+
+          {sharedUsers.length === 0 ? (
+            <div className="p-4 text-center text-xs text-neutral-400 bg-neutral-50 dark:bg-neutral-950/50 rounded-2xl border border-neutral-100 dark:border-neutral-800/80">
+              Nenhum usuário compartilhado ainda. Adicione pelo ID acima.
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+              {sharedUsers.map((u: any) => (
+                <div key={u.userId} className="flex items-center justify-between p-3 bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-2xl text-xs">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-500 border border-emerald-500/40 flex items-center justify-center shrink-0">
+                      <UserCheck className="w-3.5 h-3.5 text-emerald-500" />
+                    </div>
+                    <span className="font-mono text-neutral-900 dark:text-neutral-200 truncate">{u.userId}</span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={u.role}
+                      onChange={(e) => updateSharedUserRole(activeChat.id, u.userId, e.target.value as any)}
+                      className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 text-neutral-800 dark:text-neutral-200 text-[11px] font-semibold rounded-lg px-2 py-1 focus:outline-none"
+                    >
+                      <option value="viewer">Somente ver</option>
+                      <option value="editor">Editor</option>
+                      <option value="admin">Administrador</option>
+                    </select>
+
+                    <button
+                      onClick={() => removeSharedUser(activeChat.id, u.userId)}
+                      className="p-1.5 text-neutral-400 hover:text-red-500 rounded-lg hover:bg-neutral-200 dark:hover:bg-neutral-800 transition-colors"
+                      title="Remover acesso"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <button 
+          onClick={() => setShareModalOpen(false)}
+          className="w-full py-2.5 text-[11px] font-bold text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 tracking-wider text-center"
         >
-          <Copy className="w-3.5 h-3.5" />
-          <span>Copiar Link Público</span>
+          CONCLUÍDO
         </button>
       </div>
     </div>
   );
 }
 
-function ToastNotification({ message }: { message: string | null }) {
-  if (!message) return null;
-  return (
-    <div className="fixed bottom-20 right-6 z-50 bg-neutral-900 border border-neutral-800 text-neutral-200 px-4 py-2.5 rounded-xl shadow-2xl text-xs flex items-center gap-2">
-      <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-      <span>{message}</span>
-    </div>
-  );
+function ToastNotification({ message: _message }: { message: string | null }) {
+  // User explicitly asked to remove all notifications from the app
+  return null;
 }
 
 // ==========================================
@@ -1868,14 +3461,48 @@ function AppContent() {
     chats, setChats, activeChatId, activeChat, createNewChat,
     setSidebarOpen, setShareModalOpen, isGenerating, setIsGenerating,
     setGenerationState, showToast, toastMessage, previewHtmlCode, setPreviewHtmlCode,
-    settings, setGeminiLiveOpen, cameraModalOpen, setCameraModalOpen
+    settings, setGeminiLiveOpen, cameraModalOpen, setCameraModalOpen,
+    myUserId
   } = useApp();
 
   const [inputText, setInputText] = useState('');
+  const [editingMessage, setEditingMessage] = useState<{ index: number; content: string } | null>(null);
+
+  const handleEditUserMessage = (text: string, index: number) => {
+    if (!activeChat) return;
+    setEditingMessage({ index, content: text });
+    setInputText(text);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingMessage(null);
+    setInputText('');
+  };
 
   const handleSendMessage = async (userInputText: string, customChatId?: string) => {
     let chatId = customChatId || activeChatId;
     if (!chatId) chatId = createNewChat();
+
+    // If editing a message, update in place without erasing anything
+    if (editingMessage !== null) {
+      setChats((prev: any) => prev.map((c: any) => {
+        if (c.id === chatId) {
+          const updated = [...c.messages];
+          if (updated[editingMessage.index]) {
+            updated[editingMessage.index] = {
+              ...updated[editingMessage.index],
+              content: userInputText,
+              editedAt: new Date().toISOString()
+            };
+          }
+          return { ...c, messages: updated };
+        }
+        return c;
+      }));
+      setEditingMessage(null);
+      setInputText('');
+      return;
+    }
 
     const userMsg = {
       role: 'user',
@@ -1908,6 +3535,48 @@ function AppContent() {
       return c;
     }));
 
+    if (userInputText.startsWith('[IMAGE_GEN')) {
+      const match = userInputText.match(/^\[IMAGE_GEN(?::([^\]]+))?\]\s*(.*)$/);
+      const ratio = match?.[1] || '1:1';
+      const prompt = match?.[2] || userInputText.replace('[IMAGE_GEN]', '').trim();
+      setGenerationState('Gerando imagem...');
+      try {
+        const res = await fetch('/api/image/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt, aspectRatio: ratio })
+        });
+        const data = await res.json();
+        if (data.imageUrl) {
+          const assistantMsg = {
+            role: 'assistant',
+            content: `Aqui está a sua imagem: **"${prompt}"** (Proporção: ${ratio})\n\n![Generated Image](${data.imageUrl})\n\n${data.text || ''}`,
+            timestamp: new Date().toISOString()
+          };
+          setChats((prev: any) => prev.map((c: any) => {
+            if (c.id === chatId) return { ...c, messages: [...c.messages, assistantMsg] };
+            return c;
+          }));
+        } else {
+          throw new Error(data.error || 'Falha ao gerar imagem');
+        }
+      } catch (err: any) {
+        console.error('Image Gen Error:', err);
+        const errMsg = {
+          role: 'assistant',
+          content: 'Não foi possível gerar a imagem no momento. Por favor, tente novamente.',
+          timestamp: new Date().toISOString()
+        };
+        setChats((prev: any) => prev.map((c: any) => {
+          if (c.id === chatId) return { ...c, messages: [...c.messages, errMsg] };
+          return c;
+        }));
+      } finally {
+        setIsGenerating(false);
+      }
+      return;
+    }
+
     try {
       await aiProvider.streamResponse(
         history,
@@ -1932,15 +3601,6 @@ function AppContent() {
     }
   };
 
-  const handleEditUserMessage = (text: string, index: number) => {
-    if (!activeChat) return;
-    setInputText(text);
-
-    const truncated = activeChat.messages.slice(0, index);
-    setChats((prev: any) => prev.map((c: any) => c.id === activeChat.id ? { ...c, messages: truncated } : c));
-    showToast('Mensagem pronta para edição');
-  };
-
   const handleRegenerate = () => {
     if (!activeChat || activeChat.messages.length === 0) return;
     const lastUserIndex = [...activeChat.messages].map((m, idx) => m.role === 'user' ? idx : -1).filter(i => i !== -1).pop();
@@ -1952,63 +3612,121 @@ function AppContent() {
     }
   };
 
-  const handleDownloadFullChat = () => {
+  const handleDownloadFullChat = (format: 'txt' | 'md' | 'html' | 'json' = 'txt') => {
     if (!activeChat || activeChat.messages.length === 0) return;
-    const content = activeChat.messages.map((m: any) => `[${m.role.toUpperCase()}]\n${m.content}\n`).join('\n---\n\n');
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    
+    let content = '';
+    let mimeType = 'text/plain';
+    
+    if (format === 'json') {
+      content = JSON.stringify(activeChat, null, 2);
+      mimeType = 'application/json';
+    } else if (format === 'html') {
+      content = `
+        <html>
+          <head>
+            <style>
+              body { font-family: sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; line-height: 1.6; background: #f4f4f9; }
+              .msg { margin-bottom: 20px; padding: 15px; border-radius: 10px; background: white; border: 1px solid #ddd; }
+              .user { border-left: 5px solid #7c3aed; }
+              .assistant { border-left: 5px solid #10b981; }
+              .role { font-weight: bold; text-transform: uppercase; font-size: 0.8em; margin-bottom: 5px; color: #666; }
+            </style>
+          </head>
+          <body>
+            <h1>Exportação de Chat - DEV AI</h1>
+            ${activeChat.messages.map((m: any) => `
+              <div class="msg ${m.role}">
+                <div class="role">${m.role}</div>
+                <div class="content">${m.content.replace(/\n/g, '<br>')}</div>
+              </div>
+            `).join('')}
+          </body>
+        </html>
+      `;
+      mimeType = 'text/html';
+    } else {
+      content = activeChat.messages.map((m: any) => `[${m.role.toUpperCase()}]\n${m.content}\n`).join('\n---\n\n');
+      mimeType = 'text/markdown';
+    }
+
+    const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `chat_export_${Date.now()}.txt`;
+    a.download = `chat_export_${Date.now()}.${format}`;
     a.click();
     URL.revokeObjectURL(url);
-    showToast('Conversa baixada');
+    showToast(`Conversa baixada em .${format}`);
   };
 
+  const canShare = activeChat?.myRole === 'admin' || !activeChat?.myRole || activeChat?.ownerId === myUserId;
+
   return (
-    <div className="flex h-screen w-screen bg-neutral-950 text-neutral-100 font-sans overflow-hidden antialiased">
+    <div className="flex h-screen w-screen bg-white dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100 font-sans overflow-hidden antialiased">
       <Sidebar />
 
-      <main className="flex-1 flex flex-col min-w-0 relative bg-neutral-950">
-        <header className="h-14 border-b border-neutral-900 px-4 flex items-center justify-between bg-neutral-950 z-10">
+      <main className="flex-1 flex flex-col min-w-0 relative bg-white dark:bg-neutral-950">
+        <header className="h-14 border-b border-neutral-200 dark:border-neutral-900 px-4 flex items-center justify-between bg-white dark:bg-neutral-950 z-10">
           <div className="flex items-center gap-3">
             <button
               onClick={() => setSidebarOpen(true)}
-              className="p-1.5 text-neutral-400 hover:text-neutral-100 rounded-lg"
+              className="p-1.5 text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 rounded-lg"
             >
               <PanelLeft className="w-5 h-5" />
             </button>
 
             <div className="flex items-center gap-2">
-              <div className="w-6 h-6 rounded-lg bg-neutral-900 overflow-hidden border border-neutral-800 flex items-center justify-center">
-                <img src="/public/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="DEV AI" className="w-full h-full object-cover" />
+              <div className="w-6 h-6 rounded-lg bg-neutral-100 dark:bg-neutral-900 overflow-hidden border border-neutral-200 dark:border-neutral-800 flex items-center justify-center shadow-xs">
+                <img src="/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="DEV AI" className="w-full h-full object-cover" />
               </div>
-              <span className="font-bold text-sm text-neutral-100">DEV AI</span>
+              <span className="font-bold text-sm text-neutral-900 dark:text-neutral-100 uppercase tracking-tighter">DEV AI</span>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1">
             <button
               onClick={() => setGeminiLiveOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 text-xs font-bold transition-all shadow-sm"
-              title="Iniciar Ligação Gemini 3.8 Live"
+              className="p-2 text-emerald-600 dark:text-emerald-400 hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-neutral-100 dark:hover:bg-neutral-900 rounded-lg transition-colors"
+              title="Iniciar Dev Live"
             >
-              <PhoneCall className="w-4 h-4 text-emerald-400" />
-              <span className="hidden sm:inline">Ligar</span>
+              <PhoneCall className="w-5 h-5" />
             </button>
 
-            <button
-              onClick={() => setShareModalOpen(true)}
-              className="p-2 text-neutral-400 hover:text-neutral-100 hover:bg-neutral-900 rounded-lg transition-colors"
-            >
-              <Share2 className="w-4 h-4" />
-            </button>
-            <button
-              onClick={handleDownloadFullChat}
-              className="p-2 text-neutral-400 hover:text-neutral-100 hover:bg-neutral-900 rounded-lg transition-colors"
-            >
-              <Download className="w-4 h-4" />
-            </button>
+            {canShare && (
+              <button
+                onClick={() => setShareModalOpen(true)}
+                className="p-2 text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-900 rounded-lg transition-colors"
+                title="Compartilhar Conversa"
+              >
+                <Share2 className="w-5 h-5" />
+              </button>
+            )}
+
+            <div className="relative group/export">
+              <button
+                className="p-2 text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-900 rounded-lg transition-colors"
+                title="Download chat"
+              >
+                <Download className="w-5 h-5" />
+              </button>
+              <div className="absolute right-0 top-full mt-1 w-40 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl shadow-2xl py-1 z-50 text-xs hidden group-hover/export:block">
+                {[
+                  { id: 'txt', label: 'Texto (.txt)' },
+                  { id: 'md', label: 'Markdown (.md)' },
+                  { id: 'html', label: 'Página Web (.html)' },
+                  { id: 'json', label: 'Dados (.json)' }
+                ].map(fmt => (
+                  <button
+                    key={fmt.id}
+                    onClick={() => handleDownloadFullChat(fmt.id as any)}
+                    className="w-full text-left px-4 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-700 dark:text-neutral-300"
+                  >
+                    {fmt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </header>
 
@@ -2028,6 +3746,8 @@ function AppContent() {
           onCancel={() => aiProvider.cancelGeneration()}
           inputText={inputText}
           setInputText={setInputText}
+          editingMessage={editingMessage}
+          onCancelEdit={handleCancelEdit}
         />
       </main>
 
@@ -2036,7 +3756,9 @@ function AppContent() {
       <ShareModal />
       <SettingsModal />
       <RenameModal />
-      <GeminiLiveModal />
+      <DevLiveModal />
+      <ImageGenModal onGenerate={(prompt, ratio) => handleSendMessage(`[IMAGE_GEN:${ratio}] ${prompt}`)} />
+      <TextSelectionModal />
       <CameraModal onCapture={(photos) => {
         handleSendMessage(`Analise estas ${photos.length} fotos capturadas:`, activeChatId);
       }} />
@@ -2048,6 +3770,43 @@ function AppContent() {
         isGenerating={isGenerating}
       />
       <ToastNotification message={toastMessage} />
+    </div>
+  );
+}
+
+// Text Selection Modal for Mobile
+function TextSelectionModal() {
+  const { textSelectionData, setTextSelectionData, showToast } = useApp();
+  if (!textSelectionData) return null;
+
+  return (
+    <div className="fixed inset-0 z-[10000] bg-white dark:bg-neutral-950 flex flex-col p-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
+      <div className="flex items-center justify-between pb-4 border-b border-neutral-200 dark:border-neutral-900">
+        <h3 className="font-black text-lg text-neutral-900 dark:text-white tracking-tighter">SELECIONAR TEXTO</h3>
+        <button onClick={() => setTextSelectionData(null)} className="p-2 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-900 text-neutral-500">
+          <X className="w-6 h-6" />
+        </button>
+      </div>
+      
+      <div className="flex-1 py-6 overflow-y-auto">
+        <div className="bg-neutral-50 dark:bg-neutral-900 p-6 rounded-3xl border border-neutral-200 dark:border-neutral-800 text-neutral-900 dark:text-neutral-100 text-sm leading-relaxed whitespace-pre-wrap select-text selection:bg-emerald-500/30 font-sans">
+          {textSelectionData}
+        </div>
+      </div>
+
+      <div className="pt-4 flex items-center justify-between border-t border-neutral-200 dark:border-neutral-900">
+        <p className="text-[10px] text-neutral-500 font-bold uppercase tracking-widest">Pressione e segure o texto para selecionar</p>
+        <button 
+          onClick={() => {
+            navigator.clipboard.writeText(textSelectionData);
+            showToast('Todo o texto copiado!');
+          }}
+          className="flex items-center gap-2 px-6 py-3 bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 rounded-2xl font-black text-xs shadow-xl active:scale-95 transition-all"
+        >
+          <Copy className="w-4 h-4" />
+          <span>COPIAR TUDO</span>
+        </button>
+      </div>
     </div>
   );
 }

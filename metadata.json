@@ -1,6 +1,6 @@
 {
-  "name": "",
-  "description": "",
-  "requestFramePermissions": [],
+  "name": "DEV AI - Inteligência Artificial Premium",
+  "description": "Plataforma de Inteligência Artificial Premium com modelos Gemini 3.8, Dev Live e sincronização em tempo real.",
+  "requestFramePermissions": ["camera", "microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
