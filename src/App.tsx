@@ -33,7 +33,8 @@ class RealAIProvider {
     messages: Array<{ role: string; content: string }>,
     onChunk: (chunk: string) => void,
     onStateChange: (state: string) => void,
-    selectedModel: string = 'gemini-3.8-flash'
+    selectedModel: string = 'gemini-3.8-flash',
+    personalityPrompt: string = ''
   ) {
     this.abortController = new AbortController();
 
@@ -44,13 +45,21 @@ class RealAIProvider {
     };
 
     try {
-      await updateState('Conectando ao Gemini 3.8...', 250);
+      await updateState('Conectando ao Gemini...', 250);
       await updateState('Pensando...', 350);
+
+      const cleanMessages = messages.filter((m: any) => 
+        (m.content && m.content.trim().length > 0) || (Array.isArray(m.attachments) && m.attachments.length > 0)
+      );
 
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages, model: selectedModel }),
+        body: JSON.stringify({ 
+          messages: cleanMessages, 
+          model: selectedModel,
+          personalityPrompt: personalityPrompt 
+        }),
         signal: this.abortController.signal
       });
 
@@ -188,6 +197,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [previewHtmlCode, setPreviewHtmlCode] = useState<string | null>(null);
   const [textSelectionData, setTextSelectionData] = useState<string | null>(null);
+  const [selectedMediaPreview, setSelectedMediaPreview] = useState<any>(null);
   const [onlineCount, setOnlineCount] = useState(1);
 
   // Auto-sync shared chats with my user ID
@@ -512,6 +522,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       generationTime, generationState, setGenerationState, showToast, toastMessage,
       previewHtmlCode, setPreviewHtmlCode, onlineCount,
       textSelectionData, setTextSelectionData,
+      selectedMediaPreview, setSelectedMediaPreview,
       shareChatWithUser, updateSharedUserRole, removeSharedUser
     }}>
       {children}
@@ -856,7 +867,7 @@ function ChatMessageItem({
 }) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const { setTextSelectionData } = useApp();
+  const { setTextSelectionData, setSelectedMediaPreview } = useApp();
   const isUser = msg.role === 'user';
 
   const messageTime = useMemo(() => {
@@ -880,8 +891,35 @@ function ChatMessageItem({
           <span className="text-[11px] font-bold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider pr-1">
             {userSettings.userName}
           </span>
-          <div className="relative group/bubble bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-neutral-900 dark:text-neutral-100 rounded-2xl px-4 py-2.5 text-sm max-w-[85%] shadow-xs">
-            {msg.content}
+          <div className="relative group/bubble bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-neutral-900 dark:text-neutral-100 rounded-2xl px-4 py-2.5 text-sm max-w-[85%] shadow-xs space-y-2">
+            {/* Render user attachments if present */}
+            {Array.isArray(msg.attachments) && msg.attachments.length > 0 && (
+              <div className="flex flex-wrap gap-2 pb-1">
+                {msg.attachments.map((att: any, attIdx: number) => (
+                  <div
+                    key={att.id || attIdx}
+                    onClick={() => setSelectedMediaPreview && setSelectedMediaPreview(att)}
+                    className="relative overflow-hidden rounded-xl border border-neutral-200 dark:border-neutral-700 bg-black/5 dark:bg-black/30 cursor-pointer hover:opacity-90 transition-all shadow-xs"
+                    title="Clique para expandir"
+                  >
+                    {att.type === 'image' || (att.url && (att.url.startsWith('data:image') || att.url.match(/\.(jpeg|jpg|gif|png|webp)/i))) ? (
+                      <img src={att.url} alt={att.name || 'Foto'} className="max-w-[220px] max-h-[180px] object-cover rounded-xl" />
+                    ) : att.type === 'video' || (att.url && (att.url.startsWith('data:video') || att.url.match(/\.(mp4|webm)/i))) ? (
+                      <video src={att.url} className="max-w-[220px] max-h-[180px] rounded-xl object-cover" />
+                    ) : (
+                      <div className="flex items-center gap-2 p-2.5 text-xs text-neutral-800 dark:text-neutral-200">
+                        <FileText className="w-5 h-5 text-emerald-500 shrink-0" />
+                        <div className="truncate max-w-[130px]">
+                          <div className="truncate font-semibold">{att.name || 'Arquivo'}</div>
+                          <div className="text-[9px] opacity-70">{att.size || 'Documento'}</div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {msg.content && <div>{msg.content}</div>}
           </div>
           <div className="flex items-center gap-1 pt-1 opacity-80 group-hover:opacity-100 transition-opacity">
             <button
@@ -1431,8 +1469,24 @@ function CameraModal({ onCapture }: { onCapture: (photos: string[]) => void }) {
 
       const canvas = document.createElement('canvas');
       const video = videoRef.current;
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 480;
+      const rawW = video.videoWidth || 1280;
+      const rawH = video.videoHeight || 720;
+      const maxDim = 1024;
+      let targetW = rawW;
+      let targetH = rawH;
+
+      if (targetW > maxDim || targetH > maxDim) {
+        if (targetW > targetH) {
+          targetH = Math.round((targetH * maxDim) / targetW);
+          targetW = maxDim;
+        } else {
+          targetW = Math.round((targetW * maxDim) / targetH);
+          targetH = maxDim;
+        }
+      }
+
+      canvas.width = targetW;
+      canvas.height = targetH;
       const ctx = canvas.getContext('2d');
       if (ctx) {
         // Apply filter to canvas if selected
@@ -1441,8 +1495,8 @@ function CameraModal({ onCapture }: { onCapture: (photos: string[]) => void }) {
         else if (activeFilter === 'vivid') ctx.filter = 'saturate(160%) contrast(110%)';
         else if (activeFilter === 'retro') ctx.filter = 'contrast(120%) brightness(90%) sepia(20%)';
 
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+        ctx.drawImage(video, 0, 0, targetW, targetH);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
         setCapturedPhotos(prev => [...prev, dataUrl]);
       }
     }
@@ -1482,304 +1536,136 @@ function CameraModal({ onCapture }: { onCapture: (photos: string[]) => void }) {
   };
 
   return (
-    <div className="fixed inset-0 z-[200] bg-black flex flex-col justify-between text-white select-none overflow-hidden font-sans">
-      {/* 1. TOP BAR MATCHING SCREENSHOT 1 */}
-      <div className="relative w-full px-4 pt-3 pb-2 flex items-center justify-between z-30">
-        {/* Flash Toggle */}
+    <div className="fixed inset-0 z-[200] bg-black text-white select-none overflow-hidden font-sans">
+      {/* 1. FULL SCREEN VIEWFINDER BACKGROUND */}
+      <div className="absolute inset-0 w-full h-full bg-neutral-950 flex items-center justify-center overflow-hidden">
+        {cameraError ? (
+          <div className="p-8 text-center text-red-400 space-y-2 z-10">
+            <AlertTriangle className="w-12 h-12 mx-auto" />
+            <p className="text-sm font-medium">{cameraError}</p>
+          </div>
+        ) : (
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="absolute inset-0 w-full h-full object-cover transition-transform duration-300"
+            style={{
+              transform: getZoomScale(),
+              filter: getFilterStyle()
+            }}
+          />
+        )}
+
+        {/* Shutter Flash Animation */}
+        {flashActive && (
+          <div className="absolute inset-0 bg-white z-30 pointer-events-none transition-opacity duration-150" />
+        )}
+
+        {/* Timer Countdown Overlay */}
+        {countdown !== null && (
+          <div className="absolute inset-0 flex items-center justify-center z-30 pointer-events-none bg-black/40">
+            <span className="text-8xl font-extrabold text-amber-400 animate-ping">
+              {countdown}
+            </span>
+          </div>
+        )}
+
+        {/* Corner Brackets */}
+        <div className="absolute top-16 left-6 w-6 h-6 border-t-2 border-l-2 border-white/70 rounded-tl-xs pointer-events-none z-10" />
+        <div className="absolute top-16 right-6 w-6 h-6 border-t-2 border-r-2 border-white/70 rounded-tr-xs pointer-events-none z-10" />
+        <div className="absolute bottom-28 left-6 w-6 h-6 border-b-2 border-l-2 border-white/70 rounded-bl-xs pointer-events-none z-10" />
+        <div className="absolute bottom-28 right-6 w-6 h-6 border-b-2 border-r-2 border-white/70 rounded-br-xs pointer-events-none z-10" />
+      </div>
+
+      {/* 2. TOP HEADER BAR: "Voltar" (Top Left) & "Enviar" (Top Right) */}
+      <div className="absolute top-0 inset-x-0 p-4 pt-6 flex items-center justify-between z-30 bg-gradient-to-b from-black/80 via-black/40 to-transparent">
+        {/* Top Left: Voltar */}
+        <button
+          type="button"
+          onClick={() => setCameraModalOpen(false)}
+          className="flex items-center gap-2 px-4 py-2 rounded-full bg-black/50 backdrop-blur-md border border-white/20 text-white font-bold text-sm hover:bg-black/70 active:scale-95 transition-all"
+        >
+          <X className="w-5 h-5" />
+          <span>Voltar</span>
+        </button>
+
+        {/* Top Center: Flash toggle */}
         <button
           type="button"
           onClick={cycleFlash}
-          className="p-2 text-white/90 hover:text-white transition-colors"
+          className="p-2.5 rounded-full bg-black/40 backdrop-blur-md border border-white/10 text-white/90 hover:text-white"
           title={`Flash: ${flashMode.toUpperCase()}`}
         >
           {flashMode === 'off' ? (
-            <ZapOff className="w-6 h-6 stroke-[1.8]" />
+            <ZapOff className="w-5 h-5" />
           ) : (
-            <div className="relative">
-              <Zap className={`w-6 h-6 stroke-[1.8] ${flashMode === 'on' ? 'fill-amber-400 text-amber-400' : 'text-white'}`} />
-              {flashMode === 'auto' && (
-                <span className="absolute -top-1 -right-1 text-[10px] font-bold text-amber-300">A</span>
-              )}
-            </div>
+            <Zap className={`w-5 h-5 ${flashMode === 'on' ? 'fill-amber-400 text-amber-400' : 'text-white'}`} />
           )}
         </button>
 
-        {/* Center Pill with Down Chevron for Quick Settings */}
+        {/* Top Right: Enviar */}
         <button
           type="button"
-          onClick={() => setShowSettingsDrawer(!showSettingsDrawer)}
-          className="bg-neutral-800/90 hover:bg-neutral-700/90 px-4 py-1.5 rounded-full flex items-center justify-center transition-all shadow-md active:scale-95"
-          title="Opções da câmera"
+          onClick={handleConfirm}
+          disabled={capturedPhotos.length === 0}
+          className="flex items-center gap-2 px-5 py-2 rounded-full bg-emerald-500 hover:bg-emerald-400 disabled:bg-neutral-800/80 disabled:text-neutral-500 text-white font-bold text-sm shadow-xl active:scale-95 transition-all disabled:pointer-events-none"
         >
-          <ChevronDown className={`w-5 h-5 text-neutral-200 transition-transform duration-200 ${showSettingsDrawer ? 'rotate-180' : ''}`} />
-        </button>
-
-        {/* Android Privacy Green Dot */}
-        <div className="flex items-center justify-center w-6 h-6">
-          <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-sm shadow-emerald-400/80 animate-pulse" />
-        </div>
-      </div>
-
-      {/* Quick Settings Drawer Overlay (when center pill tapped) */}
-      {showSettingsDrawer && (
-        <div className="absolute top-14 inset-x-4 z-40 bg-neutral-900/95 backdrop-blur-xl border border-neutral-800 rounded-3xl p-4 shadow-2xl animate-in fade-in slide-in-from-top-3 duration-200 text-xs max-w-md mx-auto">
-          <div className="grid grid-cols-3 gap-3 text-center">
-            <button
-              onClick={() => setShowLevel(!showLevel)}
-              className={`p-2.5 rounded-2xl border transition-all ${
-                showLevel ? 'bg-amber-400/20 border-amber-400 text-amber-300' : 'bg-neutral-800 border-neutral-700 text-neutral-400'
-              }`}
-            >
-              <div className="font-bold text-[11px]">Nível</div>
-              <div className="text-[10px] opacity-70">{showLevel ? 'Ativado' : 'Desativado'}</div>
-            </button>
-
-            <button
-              onClick={() => setShowGrid(!showGrid)}
-              className={`p-2.5 rounded-2xl border transition-all ${
-                showGrid ? 'bg-amber-400/20 border-amber-400 text-amber-300' : 'bg-neutral-800 border-neutral-700 text-neutral-400'
-              }`}
-            >
-              <div className="font-bold text-[11px]">Grade 3x3</div>
-              <div className="text-[10px] opacity-70">{showGrid ? 'Ativada' : 'Desativada'}</div>
-            </button>
-
-            <button
-              onClick={() => setTimerSeconds(t => (t === 0 ? 3 : t === 3 ? 10 : 0))}
-              className={`p-2.5 rounded-2xl border transition-all ${
-                timerSeconds > 0 ? 'bg-amber-400/20 border-amber-400 text-amber-300' : 'bg-neutral-800 border-neutral-700 text-neutral-400'
-              }`}
-            >
-              <div className="font-bold text-[11px]">Timer</div>
-              <div className="text-[10px] opacity-70">{timerSeconds === 0 ? 'Desligado' : `${timerSeconds}s`}</div>
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* 2. VIEWFINDER FRAMING MATCHING SCREENSHOT 1 */}
-      <div className="relative flex-1 flex items-center justify-center px-2 py-1 overflow-hidden">
-        <div className="relative w-full max-w-sm sm:max-w-md aspect-[3/4] bg-neutral-950 rounded-2xl sm:rounded-3xl overflow-hidden shadow-2xl flex items-center justify-center border border-neutral-900">
-          {cameraError ? (
-            <div className="p-8 text-center text-red-400 space-y-2">
-              <AlertTriangle className="w-10 h-10 mx-auto" />
-              <p className="text-xs">{cameraError}</p>
-            </div>
-          ) : (
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full h-full object-cover transition-transform duration-300"
-              style={{
-                transform: getZoomScale(),
-                filter: getFilterStyle()
-              }}
-            />
-          )}
-
-          {/* Shutter Flash Animation */}
-          {flashActive && (
-            <div className="absolute inset-0 bg-white z-30 pointer-events-none transition-opacity duration-150" />
-          )}
-
-          {/* Timer Countdown Overlay */}
-          {countdown !== null && (
-            <div className="absolute inset-0 flex items-center justify-center z-30 pointer-events-none bg-black/30">
-              <span className="text-7xl font-extrabold text-amber-400 animate-ping">
-                {countdown}
-              </span>
-            </div>
-          )}
-
-          {/* Framing Corner Brackets ⌜ ⌝ ⌞ ⌟ matching Screenshot 1 */}
-          <div className="absolute top-3.5 left-3.5 w-4 h-4 border-t-[1.5px] border-l-[1.5px] border-white/70 rounded-tl-xs pointer-events-none" />
-          <div className="absolute top-3.5 right-3.5 w-4 h-4 border-t-[1.5px] border-r-[1.5px] border-white/70 rounded-tr-xs pointer-events-none" />
-          <div className="absolute bottom-3.5 left-3.5 w-4 h-4 border-b-[1.5px] border-l-[1.5px] border-white/70 rounded-bl-xs pointer-events-none" />
-          <div className="absolute bottom-3.5 right-3.5 w-4 h-4 border-b-[1.5px] border-r-[1.5px] border-white/70 rounded-br-xs pointer-events-none" />
-
-          {/* 3x3 Grid Overlay (if enabled) */}
-          {showGrid && (
-            <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 pointer-events-none border border-white/10 divide-x divide-y divide-white/15" />
-          )}
-
-          {/* Horizon Level Guide in the Center —|— matching Screenshot 1 */}
-          {showLevel && (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-              <div className="relative flex items-center justify-center w-36 sm:w-44 opacity-85">
-                <div className="w-full h-[1.5px] bg-white shadow-xs" />
-                <div className="absolute w-[1.5px] h-3.5 bg-white shadow-xs" />
-              </div>
-            </div>
-          )}
-
-          {/* Zoom Selector & Effects Burst at the bottom inside viewfinder matching Screenshot 1 */}
-          <div className="absolute bottom-4 inset-x-4 flex items-center justify-between z-20 pointer-events-auto">
-            <div className="w-10" />
-
-            {/* Zoom Pill: 0.6 | 1x | 2 */}
-            <div className="bg-black/60 backdrop-blur-md px-1.5 py-1 rounded-full flex items-center gap-1 border border-white/10 text-xs shadow-lg">
-              <button
-                type="button"
-                onClick={() => setZoom('0.6')}
-                className={`px-2 py-0.5 rounded-full transition-all text-[11px] ${
-                  zoom === '0.6' ? 'bg-neutral-800 text-amber-300 font-bold shadow-xs' : 'text-white/80 hover:text-white'
-                }`}
-              >
-                0.6
-              </button>
-              <button
-                type="button"
-                onClick={() => setZoom('1x')}
-                className={`px-2.5 py-0.5 rounded-full transition-all text-[11px] ${
-                  zoom === '1x' ? 'bg-neutral-800 text-amber-300 font-bold shadow-xs' : 'text-white/80 hover:text-white'
-                }`}
-              >
-                1x
-              </button>
-              <button
-                type="button"
-                onClick={() => setZoom('2')}
-                className={`px-2 py-0.5 rounded-full transition-all text-[11px] ${
-                  zoom === '2' ? 'bg-neutral-800 text-amber-300 font-bold shadow-xs' : 'text-white/80 hover:text-white'
-                }`}
-              >
-                2
-              </button>
-            </div>
-
-            {/* Sparkle / Magic Burst Button matching Screenshot 1 */}
-            <button
-              type="button"
-              onClick={cycleFilter}
-              className={`p-2 rounded-full backdrop-blur-md border border-white/10 transition-all ${
-                activeFilter !== 'none' ? 'bg-amber-400/30 text-amber-300 border-amber-400/50' : 'bg-black/60 text-white/90 hover:text-white'
-              }`}
-              title={`Efeito: ${activeFilter.toUpperCase()}`}
-            >
-              <Sparkles className="w-4 h-4 stroke-[2]" />
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* 3. MODE SELECTOR BELOW VIEWFINDER MATCHING SCREENSHOT 1 */}
-      <div className="w-full flex items-center justify-center gap-6 py-2 select-none overflow-x-auto scrollbar-none z-20">
-        <button
-          type="button"
-          onClick={() => setActiveMode('noite')}
-          className={`text-xs transition-colors whitespace-nowrap ${
-            activeMode === 'noite' ? 'text-amber-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'
-          }`}
-        >
-          Noite
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveMode('video')}
-          className={`text-xs transition-colors whitespace-nowrap ${
-            activeMode === 'video' ? 'text-amber-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'
-          }`}
-        >
-          Vídeo
-        </button>
-        {/* Foto Mode highlighted in warm gold yellow matching Screenshot 1 */}
-        <button
-          type="button"
-          onClick={() => setActiveMode('foto')}
-          className="text-amber-400 font-bold text-sm tracking-wide whitespace-nowrap px-1"
-        >
-          Foto
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveMode('retrato')}
-          className={`text-xs transition-colors whitespace-nowrap ${
-            activeMode === 'retrato' ? 'text-amber-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'
-          }`}
-        >
-          Retrato
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveMode('pro')}
-          className={`text-xs transition-colors whitespace-nowrap ${
-            activeMode === 'pro' ? 'text-amber-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'
-          }`}
-        >
-          Pro
+          <Send className="w-4 h-4" />
+          <span>Enviar {capturedPhotos.length > 0 ? `(${capturedPhotos.length})` : ''}</span>
         </button>
       </div>
 
-      {/* 4. CONFIRMATION FLOATING BUTTON (IF PHOTOS CAPTURED) */}
-      {capturedPhotos.length > 0 && (
-        <div className="w-full flex items-center justify-center px-4 py-1 z-30 animate-in fade-in slide-in-from-bottom-2">
+      {/* 3. BOTTOM CONTROLS BAR: "Imagens" | "Tirar foto" | "Rotação" */}
+      <div className="absolute bottom-0 inset-x-0 pb-8 pt-12 px-6 bg-gradient-to-t from-black/90 via-black/50 to-transparent flex items-center justify-around z-30">
+        {/* Left: Imagens */}
+        <div className="flex flex-col items-center gap-1.5 min-w-[70px]">
           <button
             type="button"
-            onClick={handleConfirm}
-            className="flex items-center gap-2 px-5 py-2.5 rounded-full bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-xl active:scale-95 transition-all"
+            onClick={capturedPhotos.length > 0 ? handleConfirm : undefined}
+            className="relative w-14 h-14 rounded-2xl bg-neutral-900/80 border border-white/20 flex items-center justify-center text-white overflow-hidden shadow-lg active:scale-90 transition-transform"
           >
-            <Check className="w-4 h-4" />
-            <span>Enviar fotos capturadas ({capturedPhotos.length})</span>
+            {capturedPhotos.length > 0 ? (
+              <>
+                <img src={capturedPhotos[capturedPhotos.length - 1]} alt="thumb" className="w-full h-full object-cover" />
+                <div className="absolute top-1 right-1 bg-emerald-500 text-white font-bold text-[10px] w-4 h-4 rounded-full flex items-center justify-center">
+                  {capturedPhotos.length}
+                </div>
+              </>
+            ) : (
+              <Image className="w-6 h-6 text-white/90" />
+            )}
           </button>
-        </div>
-      )}
-
-      {/* 5. BOTTOM SHUTTER CONTROLS BAR MATCHING SCREENSHOT 1 */}
-      <div className="w-full max-w-md mx-auto px-6 py-4 flex items-center justify-between z-20">
-        {/* Left: Close 'X' button OR Thumbnail of last captured photo */}
-        <div className="w-14 flex items-center justify-center">
-          {capturedPhotos.length > 0 ? (
-            <div 
-              onClick={handleConfirm}
-              className="relative w-11 h-11 rounded-full overflow-hidden border-2 border-white cursor-pointer shadow-lg active:scale-90 transition-transform"
-              title="Confirmar envio"
-            >
-              <img src={capturedPhotos[capturedPhotos.length - 1]} alt="thumb" className="w-full h-full object-cover" />
-              <div className="absolute top-0 right-0 bg-blue-600 text-[10px] text-white font-bold w-4 h-4 rounded-full flex items-center justify-center">
-                {capturedPhotos.length}
-              </div>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setCameraModalOpen(false)}
-              className="p-3 text-white/90 hover:text-white rounded-full hover:bg-neutral-900 transition-colors active:scale-90"
-              title="Fechar câmera"
-            >
-              <X className="w-7 h-7 stroke-[2]" />
-            </button>
-          )}
+          <span className="text-xs font-semibold text-white/90">Imagens</span>
         </div>
 
-        {/* Center: Iconic Android Double-Ring Shutter Button matching Screenshot 1 */}
-        <div className="flex items-center justify-center">
+        {/* Center: Tirar foto */}
+        <div className="flex flex-col items-center gap-1.5">
           <button
             type="button"
             onClick={takeSnapshot}
-            className="w-20 h-20 rounded-full border-[3.5px] border-white p-1 flex items-center justify-center cursor-pointer active:scale-95 transition-all shadow-2xl focus:outline-none"
+            className="w-20 h-20 rounded-full border-4 border-white p-1 flex items-center justify-center active:scale-90 transition-all shadow-2xl focus:outline-none"
             title="Tirar foto"
           >
-            <div className="w-full h-full rounded-full bg-white active:bg-neutral-300 transition-colors shadow-md" />
+            <div className="w-full h-full rounded-full bg-white active:bg-neutral-300 transition-colors" />
           </button>
+          <span className="text-xs font-bold text-amber-400">Tirar foto</span>
         </div>
 
-        {/* Right: Flip Camera button matching Screenshot 1 */}
-        <div className="w-14 flex items-center justify-center">
+        {/* Right: Rotação */}
+        <div className="flex flex-col items-center gap-1.5 min-w-[70px]">
           <button
             type="button"
             onClick={() => setFacingMode(f => (f === 'user' ? 'environment' : 'user'))}
-            className="p-3 text-white/90 hover:text-white rounded-full bg-neutral-900/60 hover:bg-neutral-800 transition-all active:rotate-180 duration-300 shadow-md"
-            title="Inverter câmera (Frontal / Traseira)"
+            className="w-14 h-14 rounded-2xl bg-neutral-900/80 border border-white/20 flex items-center justify-center text-white shadow-lg active:scale-90 active:rotate-180 transition-all duration-300"
+            title="Rotacionar câmera"
           >
-            <RefreshCw className="w-6 h-6 stroke-[2]" />
+            <RefreshCw className="w-6 h-6 text-white/90" />
           </button>
+          <span className="text-xs font-semibold text-white/90">Rotação</span>
         </div>
       </div>
-
-      {/* 6. BOTTOM ANDROID GESTURE INDICATOR BAR MATCHING SCREENSHOT 1 */}
-      <div className="w-32 h-1 bg-white/70 rounded-full mx-auto mb-2 shrink-0" />
     </div>
   );
 }
@@ -2375,6 +2261,98 @@ function ImageGenModal({ onGenerate }: { onGenerate: (prompt: string, ratio: str
 }
 
 // ==========================================
+// PASTE CHOICE MODAL (EXACT SCREENSHOT SPEC)
+// ==========================================
+
+function PasteChoiceModal({
+  modalData,
+  onClose,
+  onChooseText,
+  onChooseFile
+}: {
+  modalData: { text?: string; files?: File[] } | null;
+  onClose: () => void;
+  onChooseText: (text: string) => void;
+  onChooseFile: (text?: string, files?: File[]) => void;
+}) {
+  const [rememberChoice, setRememberChoice] = useState(() => {
+    return Boolean(localStorage.getItem('DEV_AI_REMEMBER_PASTE'));
+  });
+
+  if (!modalData) return null;
+
+  const handleActionFile = () => {
+    if (rememberChoice) {
+      localStorage.setItem('DEV_AI_REMEMBER_PASTE', 'file');
+    }
+    onChooseFile(modalData.text, modalData.files);
+    onClose();
+  };
+
+  const handleActionText = () => {
+    if (rememberChoice) {
+      localStorage.setItem('DEV_AI_REMEMBER_PASTE', 'text');
+    }
+    if (modalData.text) onChooseText(modalData.text);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60000] bg-black/75 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4 animate-in fade-in duration-200 font-sans select-none">
+      <div className="bg-[#181818] border-t border-neutral-800 sm:border rounded-t-[32px] sm:rounded-[32px] w-full max-w-md p-6 sm:p-8 space-y-6 shadow-2xl relative text-white">
+        {/* Drag handle pill matching screenshot */}
+        <div className="w-10 h-1.5 bg-neutral-600/80 rounded-full mx-auto mb-2" />
+
+        <div className="space-y-2 text-left">
+          <h3 className="text-xl font-bold text-white tracking-tight">Texto grande</h3>
+          <p className="text-sm text-neutral-300 font-normal leading-relaxed">
+            O texto que está colando é um pouco grande. Gostaria de anexá-lo como um arquivo?
+          </p>
+        </div>
+
+        <div className="space-y-3.5 pt-1">
+          {/* Main White Pill Button matching screenshot */}
+          <button
+            type="button"
+            onClick={handleActionFile}
+            className="w-full bg-white hover:bg-neutral-200 active:scale-[0.98] text-neutral-950 font-semibold text-base py-4 rounded-full transition-all shadow-md text-center"
+          >
+            Anexar como Arquivo
+          </button>
+
+          {/* Secondary Dark Grey Pill Button matching screenshot */}
+          <button
+            type="button"
+            onClick={handleActionText}
+            className="w-full bg-[#2c2c2c] hover:bg-[#3c3c3c] active:scale-[0.98] text-white font-semibold text-base py-4 rounded-full transition-all text-center"
+          >
+            Colar como texto
+          </button>
+        </div>
+
+        {/* Bottom Toggle Row matching screenshot: Lembrar minha escolha */}
+        <div className="flex items-center justify-between pt-4 border-t border-neutral-800/80">
+          <span className="text-sm font-medium text-neutral-300">Lembrar minha escolha</span>
+          <button
+            type="button"
+            onClick={() => {
+              const next = !rememberChoice;
+              setRememberChoice(next);
+              if (!next) localStorage.removeItem('DEV_AI_REMEMBER_PASTE');
+            }}
+            className={`w-12 h-7 rounded-full p-1 transition-colors duration-200 flex items-center ${
+              rememberChoice ? 'bg-white justify-end' : 'bg-[#333333] justify-start'
+            }`}
+          >
+            <div className={`w-5 h-5 rounded-full transition-all ${rememberChoice ? 'bg-black' : 'bg-neutral-400'}`} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ==========================================
 // CHAT INPUT
 // ==========================================
 
@@ -2405,25 +2383,44 @@ function ChatInput({
   inputText,
   setInputText,
   editingMessage,
-  onCancelEdit
+  onCancelEdit,
+  pendingAttachments,
+  setPendingAttachments
 }: {
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string, atts?: any[]) => void;
   isGenerating: boolean;
   onCancel: () => void;
   inputText: string;
   setInputText: (t: string) => void;
   editingMessage?: { index: number; content: string } | null;
   onCancelEdit?: () => void;
+  pendingAttachments?: any[];
+  setPendingAttachments?: (atts: any[]) => void;
 }) {
   const [attachments, setAttachments] = useState<any[]>([]);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [isRecordingAudio, setIsRecordingAudio] = useState(false);
-  const { settings, setModelSelectorOpen, setExpandedEditorOpen, setCameraModalOpen, setImageGenModalOpen, showToast, activeChat } = useApp();
+  const [waveBars, setWaveBars] = useState<number[]>(Array(24).fill(4));
+  const [pasteModalData, setPasteModalData] = useState<{ text?: string; files?: File[] } | null>(null);
+  const { settings, setModelSelectorOpen, setExpandedEditorOpen, setCameraModalOpen, setImageGenModalOpen, showToast, activeChat, setSelectedMediaPreview } = useApp();
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const animFrameRef = useRef<number | null>(null);
+  const recognitionRef = useRef<any>(null);
 
   const isViewer = activeChat?.myRole === 'viewer';
+
+  // Sync external pendingAttachments (e.g. captured camera photos) into attachments above input
+  useEffect(() => {
+    if (pendingAttachments && pendingAttachments.length > 0) {
+      setAttachments(prev => [...prev, ...pendingAttachments]);
+      if (setPendingAttachments) setPendingAttachments([]);
+    }
+  }, [pendingAttachments, setPendingAttachments]);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -2433,6 +2430,45 @@ function ChatInput({
     }
   }, [inputText]);
 
+  // Clean up audio & speech streams on unmount
+  useEffect(() => {
+    return () => {
+      stopVoiceRecording();
+    };
+  }, []);
+
+  const handleChooseText = (text: string) => {
+    setInputText(inputText ? `${inputText}\n${text}` : text);
+  };
+
+  const handleChooseFile = (text?: string, files?: File[]) => {
+    const newAtts: any[] = [];
+    if (files && files.length > 0) {
+      files.forEach(f => {
+        newAtts.push({
+          id: 'att_' + Date.now() + Math.random().toString(36).substring(7),
+          name: f.name || `arquivo_${Date.now()}`,
+          size: `${(f.size / 1024).toFixed(1)} KB`,
+          type: f.type.startsWith('image/') ? 'image' : f.type.startsWith('video/') ? 'video' : 'doc',
+          url: URL.createObjectURL(f)
+        });
+      });
+    }
+    if (text && text.trim()) {
+      const blob = new Blob([text], { type: 'text/plain' });
+      newAtts.push({
+        id: 'att_' + Date.now(),
+        name: `texto_colado_${Date.now()}.txt`,
+        size: `${(blob.size / 1024).toFixed(1)} KB`,
+        type: 'doc',
+        url: URL.createObjectURL(blob)
+      });
+    }
+    if (newAtts.length > 0) {
+      setAttachments(prev => [...prev, ...newAtts]);
+    }
+  };
+
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (isViewer) {
@@ -2440,7 +2476,7 @@ function ChatInput({
       return;
     }
     if (!inputText.trim() && attachments.length === 0) return;
-    onSendMessage(inputText.trim());
+    onSendMessage(inputText.trim(), attachments);
     setInputText('');
     setAttachments([]);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
@@ -2459,20 +2495,66 @@ function ChatInput({
     setAttachmentMenuOpen(false);
   };
 
-  const handleMicClick = () => {
-    if (isRecordingAudio) {
-      setIsRecordingAudio(false);
-      return;
+  const startVoiceRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+
+      const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioCtxClass) {
+        const audioCtx = new AudioCtxClass();
+        audioCtxRef.current = audioCtx;
+        const source = audioCtx.createMediaStreamSource(stream);
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 64;
+        source.connect(analyser);
+        analyserRef.current = analyser;
+
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        let lastShift = Date.now();
+
+        const updateWave = () => {
+          if (!analyserRef.current) return;
+          analyserRef.current.getByteFrequencyData(dataArray);
+
+          // Calculate bass energy (first 6 frequency bins)
+          let bassSum = 0;
+          for (let i = 0; i < 6; i++) {
+            bassSum += dataArray[i];
+          }
+          const bassVal = bassSum / 6;
+
+          // Calculate overall volume
+          let volSum = 0;
+          for (let i = 0; i < dataArray.length; i++) {
+            volSum += dataArray[i];
+          }
+          const volVal = volSum / dataArray.length;
+
+          const now = Date.now();
+          if (now - lastShift > 40) { // Shift wave to the right every 40ms
+            lastShift = now;
+            // Scale bar height according to bass & volume (range: 4px to 32px)
+            const bassHeight = Math.max(4, Math.min(32, (bassVal / 255) * 28 + (volVal / 255) * 8 + Math.random() * 3));
+            setWaveBars(prev => [bassHeight, ...prev.slice(0, 23)]); // Flowing to the right!
+          }
+
+          animFrameRef.current = requestAnimationFrame(updateWave);
+        };
+        updateWave();
+      }
+    } catch (e) {
+      console.warn('Microphone stream access error:', e);
     }
+
     const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (SpeechRec) {
       try {
         const recognition = new SpeechRec();
+        recognitionRef.current = recognition;
         recognition.lang = 'pt-BR';
-        recognition.interimResults = false;
-        recognition.continuous = false;
-        setIsRecordingAudio(true);
-        showToast('Ouvindo microfone... Fale agora.');
+        recognition.interimResults = true;
+        recognition.continuous = true;
 
         recognition.onresult = (event: any) => {
           let transcript = '';
@@ -2480,33 +2562,68 @@ function ChatInput({
             transcript += event.results[i][0].transcript;
           }
           if (transcript.trim()) {
-            setInputText(inputText ? `${inputText} ${transcript.trim()}` : transcript.trim());
+            setInputText(transcript.trim());
           }
         };
+
         recognition.onerror = () => {
-          setIsRecordingAudio(false);
+          stopVoiceRecording();
         };
+
         recognition.onend = () => {
-          setIsRecordingAudio(false);
+          stopVoiceRecording();
         };
+
         recognition.start();
-        return;
-      } catch (e) {}
+      } catch (e) {
+        console.warn('Speech recognition start error:', e);
+      }
     }
-    // Fallback if browser blocks or does not support Web Speech Recognition
+
     setIsRecordingAudio(true);
-    showToast('Ouvindo áudio... Fale agora.');
-    setTimeout(() => {
-      setIsRecordingAudio(false);
-      const newText = inputText ? `${inputText} Transcrição de áudio DEV AI` : 'Como criar um sistema avançado com Gemini 3.5.';
-      setInputText(newText);
-    }, 3500);
+    showToast('Ouvindo... Fale com o microfone.');
+  };
+
+  const stopVoiceRecording = () => {
+    setIsRecordingAudio(false);
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      mediaStreamRef.current = null;
+    }
+    if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+      audioCtxRef.current.close();
+      audioCtxRef.current = null;
+    }
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
+      recognitionRef.current = null;
+    }
+    analyserRef.current = null;
+    setWaveBars(Array(24).fill(4));
+  };
+
+  const handleMicClick = () => {
+    if (isRecordingAudio) {
+      stopVoiceRecording();
+    } else {
+      startVoiceRecording();
+    }
   };
 
   return (
     <div className="p-3 md:p-4 bg-transparent">
+      <PasteChoiceModal
+        modalData={pasteModalData}
+        onClose={() => setPasteModalData(null)}
+        onChooseText={handleChooseText}
+        onChooseFile={handleChooseFile}
+      />
       <div className="max-w-2xl mx-auto">
-        {/* Banner Editando mensagem com botão X para cancelar */}
+        {/* Banner Editando mensagem */}
         {editingMessage && (
           <div className="flex items-center justify-between px-4 py-2 mb-2 bg-neutral-100 dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-800 rounded-2xl text-xs animate-in fade-in duration-200 shadow-sm">
             <div className="flex items-center gap-2 text-neutral-800 dark:text-neutral-200">
@@ -2534,7 +2651,11 @@ function ChatInput({
         {attachments.length > 0 && (
           <div className="flex items-center gap-2 mb-2 overflow-x-auto pb-1 scrollbar-none">
             {attachments.map((att) => (
-              <div key={att.id} className="relative bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl p-2 flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-300 shadow-sm">
+              <div 
+                key={att.id} 
+                onClick={() => setSelectedMediaPreview(att)}
+                className="relative bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl p-2 flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-300 shadow-sm cursor-pointer hover:border-neutral-400 transition-all"
+              >
                 {att.type === 'image' ? (
                   <img src={att.url} alt="thumb" className="w-8 h-8 rounded object-cover" />
                 ) : att.type === 'video' ? (
@@ -2548,7 +2669,10 @@ function ChatInput({
                 </div>
                 <button
                   type="button"
-                  onClick={() => setAttachments(prev => prev.filter((x: any) => x.id !== att.id))}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setAttachments(prev => prev.filter((x: any) => x.id !== att.id));
+                  }}
                   className="p-1 hover:text-red-500 text-neutral-400 transition-colors"
                 >
                   <X className="w-3.5 h-3.5" />
@@ -2558,9 +2682,42 @@ function ChatInput({
           </div>
         )}
 
+        {/* Live Audio Wave Visualizer bar moving right with voice bass */}
+        {isRecordingAudio && (
+          <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-neutral-900 border border-emerald-500/40 rounded-2xl mb-2.5 animate-in fade-in duration-300 shadow-xl">
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping" />
+              <span className="text-[11px] font-extrabold text-emerald-400 uppercase tracking-widest">Ouvindo...</span>
+            </div>
+
+            {/* Soundwave bars moving to the right according to bass volume */}
+            <div className="flex-1 flex items-center justify-center gap-1 h-8 overflow-hidden px-2">
+              {waveBars.map((h, idx) => (
+                <div
+                  key={idx}
+                  className="w-1.5 rounded-full transition-all duration-75"
+                  style={{
+                    height: `${h}px`,
+                    backgroundColor: idx === 0 ? '#10b981' : idx < 6 ? '#34d399' : idx < 14 ? '#60a5fa' : '#a855f7',
+                    opacity: Math.max(0.35, 1 - (idx * 0.025))
+                  }}
+                />
+              ))}
+            </div>
+
+            <button
+              type="button"
+              onClick={stopVoiceRecording}
+              className="px-3.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs rounded-xl transition-all shrink-0 shadow-md active:scale-95"
+            >
+              Concluir
+            </button>
+          </div>
+        )}
+
         <form
           onSubmit={handleSubmit}
-          className="relative bg-white/80 dark:bg-neutral-900/50 backdrop-blur-xl border border-neutral-200 dark:border-neutral-800/50 rounded-[1.5rem] md:rounded-[2rem] p-3 shadow-2xl transition-all focus-within:border-neutral-400 dark:focus-within:border-neutral-700"
+          className="relative bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-800 rounded-3xl p-3 shadow-lg transition-all focus-within:border-neutral-400 dark:focus-within:border-neutral-700"
         >
           <div className="relative flex items-start">
             <textarea
@@ -2575,7 +2732,15 @@ function ChatInput({
                   handleSubmit();
                 }
               }}
-              placeholder={isViewer ? 'Apenas leitura (Visualizador)...' : isRecordingAudio ? 'Ouvindo áudio...' : 'Escreva uma mensagem...'}
+              onPaste={(e) => {
+                const pastedText = e.clipboardData.getData('text');
+                const pastedFiles = Array.from(e.clipboardData.files || []);
+                if (pastedFiles.length > 0 || (pastedText && pastedText.length > 250)) {
+                  e.preventDefault();
+                  setPasteModalData({ text: pastedText, files: pastedFiles });
+                }
+              }}
+              placeholder={isViewer ? 'Apenas leitura (Visualizador)...' : isRecordingAudio ? 'Ouvindo áudio... Fale agora' : 'Escreva uma mensagem...'}
               className="w-full bg-transparent text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-500 px-3 py-2 text-sm focus:outline-none resize-none overflow-y-auto max-h-32 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
               style={{ fontWeight: settings.boldFont ? 'bold' : '500' }}
             />
@@ -2591,7 +2756,8 @@ function ChatInput({
             </button>
           </div>
 
-          <div className="flex items-center justify-between pt-2 mt-2 border-t border-neutral-100 dark:border-neutral-800/80">
+          {/* Action Row WITHOUT any horizontal traversing line (border-t removed) */}
+          <div className="flex items-center justify-between mt-1">
             <div className="flex items-center gap-2">
               <div className="relative">
                 <button
@@ -2612,10 +2778,10 @@ function ChatInput({
                         setImageGenModalOpen(true);
                         setAttachmentMenuOpen(false);
                       }}
-                      className="w-full flex items-center gap-3 px-3 py-2 text-neutral-200 hover:bg-neutral-800 transition-colors"
+                      className="w-full flex items-center gap-3 px-3 py-2 text-white hover:bg-neutral-800 transition-colors"
                     >
-                      <Palette className="w-4 h-4 text-neutral-300" />
-                      <span>Criar Imagem</span>
+                      <Sparkles className="w-4 h-4 text-white" />
+                      <span className="text-white font-medium">Criar Imagem</span>
                     </button>
                     <button
                       type="button"
@@ -2625,10 +2791,10 @@ function ChatInput({
                           fileInputRef.current.click();
                         }
                       }}
-                      className="w-full flex items-center gap-3 px-3 py-2 text-neutral-200 hover:bg-neutral-800 transition-colors"
+                      className="w-full flex items-center gap-3 px-3 py-2 text-white hover:bg-neutral-800 transition-colors"
                     >
-                      <Image className="w-4 h-4 text-neutral-300" />
-                      <span>Fotos e Vídeos</span>
+                      <Image className="w-4 h-4 text-white" />
+                      <span className="text-white font-medium">Fotos e Vídeos</span>
                     </button>
                     <button
                       type="button"
@@ -2638,10 +2804,10 @@ function ChatInput({
                           fileInputRef.current.click();
                         }
                       }}
-                      className="w-full flex items-center gap-3 px-3 py-2 text-neutral-200 hover:bg-neutral-800 transition-colors"
+                      className="w-full flex items-center gap-3 px-3 py-2 text-white hover:bg-neutral-800 transition-colors"
                     >
-                      <FileText className="w-4 h-4 text-neutral-300" />
-                      <span>Arquivos</span>
+                      <FileText className="w-4 h-4 text-white" />
+                      <span className="text-white font-medium">Arquivos</span>
                     </button>
                     <button
                       type="button"
@@ -2649,16 +2815,16 @@ function ChatInput({
                         setCameraModalOpen(true);
                         setAttachmentMenuOpen(false);
                       }}
-                      className="w-full flex items-center gap-3 px-3 py-2 text-neutral-200 hover:bg-neutral-800 transition-colors"
+                      className="w-full flex items-center gap-3 px-3 py-2 text-white hover:bg-neutral-800 transition-colors"
                     >
-                      <Camera className="w-4 h-4 text-neutral-300" />
-                      <span>Câmera</span>
+                      <Camera className="w-4 h-4 text-white" />
+                      <span className="text-white font-medium">Câmera</span>
                     </button>
                   </div>
                 )}
               </div>
 
-              {/* Botão de Modelo com nome formatado e bonito (sem ficar feio 'Gemini 3') */}
+              {/* Botão de Modelo com nome formatado e bonito */}
               <button
                 type="button"
                 onClick={() => setModelSelectorOpen(true)}
@@ -2678,7 +2844,7 @@ function ChatInput({
                 disabled={isViewer}
                 onClick={handleMicClick}
                 className={`p-2 rounded-full transition-colors disabled:opacity-40 ${
-                  isRecordingAudio ? 'bg-red-500 text-white animate-pulse shadow-lg' : 'text-neutral-500 dark:text-neutral-300 hover:text-neutral-900 dark:hover:text-white hover:bg-neutral-200 dark:hover:bg-neutral-800'
+                  isRecordingAudio ? 'bg-red-500 text-white animate-pulse shadow-lg ring-2 ring-emerald-400' : 'text-neutral-500 dark:text-neutral-300 hover:text-neutral-900 dark:hover:text-white hover:bg-neutral-200 dark:hover:bg-neutral-800'
                 }`}
                 title="Microfone"
               >
@@ -3468,6 +3634,8 @@ function AppContent() {
   const [inputText, setInputText] = useState('');
   const [editingMessage, setEditingMessage] = useState<{ index: number; content: string } | null>(null);
 
+  const [pendingAttachments, setPendingAttachments] = useState<any[]>([]);
+
   const handleEditUserMessage = (text: string, index: number) => {
     if (!activeChat) return;
     setEditingMessage({ index, content: text });
@@ -3479,7 +3647,17 @@ function AppContent() {
     setInputText('');
   };
 
-  const handleSendMessage = async (userInputText: string, customChatId?: string) => {
+  const handleSendMessage = async (userInputText: string, param2?: any[] | string, param3?: string) => {
+    let customAttachments: any[] = [];
+    let customChatId: string | undefined = undefined;
+
+    if (Array.isArray(param2)) {
+      customAttachments = param2;
+      customChatId = param3;
+    } else if (typeof param2 === 'string') {
+      customChatId = param2;
+    }
+
     let chatId = customChatId || activeChatId;
     if (!chatId) chatId = createNewChat();
 
@@ -3504,15 +3682,19 @@ function AppContent() {
       return;
     }
 
+    const finalContent = userInputText.trim() || (customAttachments.length > 0 ? `Analise ${customAttachments.length === 1 ? 'esta foto capturada' : 'estas fotos capturadas'}:` : '');
+
     const userMsg = {
       role: 'user',
-      content: userInputText,
+      content: finalContent,
+      attachments: customAttachments,
       timestamp: new Date().toISOString()
     };
 
     setChats((prev: any) => prev.map((c: any) => {
       if (c.id === chatId) {
-        const title = c.messages.length === 0 ? (userInputText.slice(0, 20) + '...') : c.title;
+        const titleText = finalContent || (customAttachments.length > 0 ? customAttachments[0].name : 'Nova Conversa');
+        const title = c.messages.length === 0 ? (titleText.slice(0, 20) + '...') : c.title;
         return { ...c, title, messages: [...c.messages, userMsg] };
       }
       return c;
@@ -3521,24 +3703,13 @@ function AppContent() {
     setIsGenerating(true);
 
     const currentChat = chats.find((c: any) => c.id === chatId);
-    const history = currentChat ? [...currentChat.messages, userMsg] : [userMsg];
+    const existingMsgs = currentChat ? currentChat.messages.filter((m: any) => (m.content && m.content.trim()) || (Array.isArray(m.attachments) && m.attachments.length > 0)) : [];
+    const history = [...existingMsgs, userMsg];
 
-    let assistantContent = '';
-    const assistantMsg = {
-      role: 'assistant',
-      content: '',
-      timestamp: new Date().toISOString()
-    };
-
-    setChats((prev: any) => prev.map((c: any) => {
-      if (c.id === chatId) return { ...c, messages: [...c.messages, assistantMsg] };
-      return c;
-    }));
-
-    if (userInputText.startsWith('[IMAGE_GEN')) {
-      const match = userInputText.match(/^\[IMAGE_GEN(?::([^\]]+))?\]\s*(.*)$/);
+    if (finalContent.startsWith('[IMAGE_GEN')) {
+      const match = finalContent.match(/^\[IMAGE_GEN(?::([^\]]+))?\]\s*(.*)$/);
       const ratio = match?.[1] || '1:1';
-      const prompt = match?.[2] || userInputText.replace('[IMAGE_GEN]', '').trim();
+      const prompt = match?.[2] || finalContent.replace('[IMAGE_GEN]', '').trim();
       setGenerationState('Gerando imagem...');
       try {
         const res = await fetch('/api/image/generate', {
@@ -3577,6 +3748,9 @@ function AppContent() {
       return;
     }
 
+    let assistantContent = '';
+    let hasCreatedAssistant = false;
+
     try {
       await aiProvider.streamResponse(
         history,
@@ -3585,14 +3759,27 @@ function AppContent() {
           setChats((prev: any) => prev.map((c: any) => {
             if (c.id === chatId) {
               const updatedMsgs = [...c.messages];
-              updatedMsgs[updatedMsgs.length - 1] = { ...assistantMsg, content: assistantContent };
+              if (!hasCreatedAssistant) {
+                hasCreatedAssistant = true;
+                updatedMsgs.push({
+                  role: 'assistant',
+                  content: assistantContent,
+                  timestamp: new Date().toISOString()
+                });
+              } else {
+                updatedMsgs[updatedMsgs.length - 1] = {
+                  ...updatedMsgs[updatedMsgs.length - 1],
+                  content: assistantContent
+                };
+              }
               return { ...c, messages: updatedMsgs };
             }
             return c;
           }));
         },
         (stateText) => setGenerationState(stateText),
-        settings.selectedModel
+        settings.selectedModel,
+        settings.personalityPrompt
       );
     } catch (err) {
       console.error(err);
@@ -3748,6 +3935,8 @@ function AppContent() {
           setInputText={setInputText}
           editingMessage={editingMessage}
           onCancelEdit={handleCancelEdit}
+          pendingAttachments={pendingAttachments}
+          setPendingAttachments={setPendingAttachments}
         />
       </main>
 
@@ -3760,7 +3949,14 @@ function AppContent() {
       <ImageGenModal onGenerate={(prompt, ratio) => handleSendMessage(`[IMAGE_GEN:${ratio}] ${prompt}`)} />
       <TextSelectionModal />
       <CameraModal onCapture={(photos) => {
-        handleSendMessage(`Analise estas ${photos.length} fotos capturadas:`, activeChatId);
+        const newAtts = photos.map((url, idx) => ({
+          id: 'cam_' + Date.now() + '_' + idx,
+          name: `foto_camera_${idx + 1}.jpg`,
+          size: 'Foto Câmera HD',
+          type: 'image',
+          url: url
+        }));
+        setPendingAttachments(prev => [...prev, ...newAtts]);
       }} />
       <HtmlPreviewModal
         isOpen={Boolean(previewHtmlCode)}
@@ -3769,7 +3965,52 @@ function AppContent() {
         chatId={activeChat?.id}
         isGenerating={isGenerating}
       />
+      <MediaPreviewModal />
       <ToastNotification message={toastMessage} />
+    </div>
+  );
+}
+
+// Media Preview Modal (opens when clicking attachments above input)
+function MediaPreviewModal() {
+  const { selectedMediaPreview, setSelectedMediaPreview } = useApp();
+  if (!selectedMediaPreview) return null;
+
+  return (
+    <div className="fixed inset-0 z-[15000] bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-4 animate-in fade-in duration-200">
+      <div className="absolute top-4 right-4 z-10">
+        <button
+          onClick={() => setSelectedMediaPreview(null)}
+          className="p-3 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+        >
+          <X className="w-6 h-6" />
+        </button>
+      </div>
+
+      <div className="max-w-4xl max-h-[85vh] flex flex-col items-center justify-center relative">
+        {selectedMediaPreview.type === 'image' ? (
+          <img src={selectedMediaPreview.url} alt="preview" className="max-w-full max-h-[75vh] object-contain rounded-2xl shadow-2xl border border-white/10" />
+        ) : selectedMediaPreview.type === 'video' ? (
+          <video src={selectedMediaPreview.url} controls autoPlay className="max-w-full max-h-[75vh] object-contain rounded-2xl shadow-2xl border border-white/10" />
+        ) : (
+          <div className="bg-neutral-900 border border-neutral-800 p-8 rounded-3xl text-center space-y-4 max-w-md w-full">
+            <FileText className="w-16 h-16 text-emerald-400 mx-auto" />
+            <h3 className="font-bold text-white text-base truncate">{selectedMediaPreview.name}</h3>
+            <p className="text-xs text-neutral-400">Tamanho: {selectedMediaPreview.size}</p>
+            <a
+              href={selectedMediaPreview.url}
+              download={selectedMediaPreview.name}
+              className="inline-block px-6 py-2.5 bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-lg"
+            >
+              Baixar Arquivo
+            </a>
+          </div>
+        )}
+        <div className="mt-4 text-center">
+          <p className="text-sm font-bold text-white">{selectedMediaPreview.name}</p>
+          <p className="text-xs text-neutral-400 mt-1">{selectedMediaPreview.size}</p>
+        </div>
+      </div>
     </div>
   );
 }
