@@ -398,62 +398,62 @@ export const CodeBlock = memo(function CodeBlock({
       {/* Main CodeBlock Card matching Screenshot 2 */}
       <div 
         ref={containerRef}
-        className="my-4 rounded-2xl border border-[#2b2d38] bg-[#16171d] text-neutral-100 overflow-hidden shadow-2xl font-mono text-xs md:text-sm w-full max-w-full relative group"
+        className="my-4 rounded-2xl border border-neutral-300 dark:border-[#2b2d38] bg-white dark:bg-[#16171d] text-neutral-900 dark:text-neutral-100 overflow-hidden shadow-2xl font-mono text-xs md:text-sm w-full max-w-full relative group"
       >
         {/* Header Bar */}
-        <div className="flex items-center justify-between px-3.5 py-2.5 bg-[#1a1b24] border-b border-[#2b2d38] select-none">
+        <div className="flex items-center justify-between px-3.5 py-2.5 bg-neutral-800/90 dark:bg-[#1a1b24] border-b border-neutral-700/80 dark:border-[#2b2d38] select-none">
           <div className="flex items-center gap-2.5 min-w-0">
             <LanguageBadge language={language} />
-            <span className="text-xs text-neutral-400 font-sans tracking-wide whitespace-nowrap">
+            <span className="text-xs text-neutral-300 dark:text-neutral-400 font-sans tracking-wide whitespace-nowrap">
               {lineCount} linhas
             </span>
           </div>
 
-          {/* Action buttons row matching screenshot 2 */}
-          <div className="flex items-center gap-1 shrink-0 ml-2">
+          {/* Action buttons row with square borders */}
+          <div className="flex items-center gap-1.5 shrink-0 ml-2">
             {/* 1. Run / Play button */}
             <button
               onClick={() => setShowHtmlPreview(true)}
-              className="p-1.5 text-neutral-400 hover:text-white rounded-lg hover:bg-neutral-800/80 transition-colors"
+              className="p-1.5 text-neutral-300 dark:text-neutral-400 hover:text-white rounded-lg border border-neutral-600/80 dark:border-neutral-700/80 bg-neutral-700/50 dark:bg-neutral-800/50 hover:bg-neutral-600 dark:hover:bg-neutral-700 hover:border-neutral-400 transition-all active:scale-95"
               title="Executar código (Play)"
             >
-              <Play className="w-4 h-4 fill-current" />
+              <Play className="w-3.5 h-3.5 fill-current" />
             </button>
 
             {/* 2. Collapse / Expand button */}
             <button
               onClick={() => setIsExpanded(!isExpanded)}
-              className="p-1.5 text-neutral-400 hover:text-white rounded-lg hover:bg-neutral-800/80 transition-colors"
+              className="p-1.5 text-neutral-300 dark:text-neutral-400 hover:text-white rounded-lg border border-neutral-600/80 dark:border-neutral-700/80 bg-neutral-700/50 dark:bg-neutral-800/50 hover:bg-neutral-600 dark:hover:bg-neutral-700 hover:border-neutral-400 transition-all active:scale-95"
               title={isExpanded ? "Recolher código" : "Expandir código"}
             >
-              {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
             </button>
 
             {/* 3. Maximize / Fullscreen button */}
             <button
               onClick={() => setIsFullScreen(true)}
-              className="p-1.5 text-neutral-400 hover:text-white rounded-lg hover:bg-neutral-800/80 transition-colors"
+              className="p-1.5 text-neutral-300 dark:text-neutral-400 hover:text-white rounded-lg border border-neutral-600/80 dark:border-neutral-700/80 bg-neutral-700/50 dark:bg-neutral-800/50 hover:bg-neutral-600 dark:hover:bg-neutral-700 hover:border-neutral-400 transition-all active:scale-95"
               title="Tela cheia"
             >
-              <Maximize2 className="w-4 h-4" />
+              <Maximize2 className="w-3.5 h-3.5" />
             </button>
 
             {/* 4. Download button */}
             <button
               onClick={handleDownload}
-              className="p-1.5 text-neutral-400 hover:text-white rounded-lg hover:bg-neutral-800/80 transition-colors"
+              className="p-1.5 text-neutral-300 dark:text-neutral-400 hover:text-white rounded-lg border border-neutral-600/80 dark:border-neutral-700/80 bg-neutral-700/50 dark:bg-neutral-800/50 hover:bg-neutral-600 dark:hover:bg-neutral-700 hover:border-neutral-400 transition-all active:scale-95"
               title="Baixar código"
             >
-              <Download className="w-4 h-4" />
+              <Download className="w-3.5 h-3.5" />
             </button>
 
             {/* 5. Copy button */}
             <button
               onClick={handleCopy}
-              className="p-1.5 text-neutral-400 hover:text-white rounded-lg hover:bg-neutral-800/80 transition-colors"
+              className="p-1.5 text-neutral-300 dark:text-neutral-400 hover:text-white rounded-lg border border-neutral-600/80 dark:border-neutral-700/80 bg-neutral-700/50 dark:bg-neutral-800/50 hover:bg-neutral-600 dark:hover:bg-neutral-700 hover:border-neutral-400 transition-all active:scale-95"
               title="Copiar código"
             >
-              {copied ? <CheckCheck className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+              {copied ? <CheckCheck className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
             </button>
           </div>
         </div>

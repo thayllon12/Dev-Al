@@ -33,6 +33,7 @@ class RealAIProvider {
     messages: Array<{ role: string; content: string }>,
     onChunk: (chunk: string) => void,
     onStateChange: (state: string) => void,
+    onError: (error: string) => void,
     selectedModel: string = 'gemini-3.8-flash',
     personalityPrompt: string = ''
   ) {
@@ -45,8 +46,8 @@ class RealAIProvider {
     };
 
     try {
-      await updateState('Conectando ao Gemini...', 250);
-      await updateState('Pensando...', 350);
+      await updateState('Conectando...', 50);
+      await updateState('Processando...', 50);
 
       const cleanMessages = messages.filter((m: any) => 
         (m.content && m.content.trim().length > 0) || (Array.isArray(m.attachments) && m.attachments.length > 0)
@@ -93,7 +94,8 @@ class RealAIProvider {
                 onChunk(parsed.text);
               }
               if (parsed.error) {
-                onChunk(`\n\n> **⚠️ Aviso do Sistema:** ${parsed.error}`);
+                onError(parsed.error);
+                break;
               }
             } catch (e) {
               // Ignore
@@ -105,7 +107,7 @@ class RealAIProvider {
       if (e.name === 'AbortError' || e.message === 'Aborted') {
         onChunk('\n\n*[Geração interrompida pelo usuário]*');
       } else {
-        onChunk('\n\n> **🔴 Erro Crítico:** Não foi possível estabelecer conexão com o servidor ou os limites de cota foram excedidos. \n\n*Iniciando modo de resposta local de emergência:* \n\nOlá! Parece que estou enfrentando uma alta demanda no momento. Por favor, tente novamente em alguns instantes ou verifique sua conexão.');
+        onError('Não foi possível conectar ao servidor. Verifique sua conexão.');
       }
     } finally {
       this.abortController = null;
@@ -165,7 +167,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     try {
       const saved = localStorage.getItem('DEV_AI_SETTINGS_V6');
       const parsed = saved ? JSON.parse(saved) : {};
-      return { ...DEFAULT_SETTINGS, ...parsed };
+      const merged = { ...DEFAULT_SETTINGS, ...parsed };
+      // Sanitize: ensure only Gemini 3 family is used
+      if (!merged.selectedModel || merged.selectedModel.includes('1.5') || merged.selectedModel.includes('2.0') || merged.selectedModel.includes('pro-1')) {
+        merged.selectedModel = 'gemini-3.8-flash';
+      }
+      return merged;
     } catch {
       return DEFAULT_SETTINGS;
     }
@@ -310,7 +317,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // Sync Settings to Cloud/Local
   useEffect(() => {
-    localStorage.setItem('DEV_AI_SETTINGS_V6', JSON.stringify(settings));
+    try {
+      localStorage.setItem('DEV_AI_SETTINGS_V6', JSON.stringify(settings));
+    } catch (e) {
+      console.warn('LocalStorage quota exceeded for settings, skipping local sync:', e);
+    }
     if (currentUser) {
       const userRef = doc(db, 'users', currentUser.uid);
       setDoc(userRef, { settings }, { merge: true }).catch(e => console.error(e));
@@ -319,12 +330,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // Sync Chats to Local
   useEffect(() => {
-    localStorage.setItem('DEV_AI_CHATS_V6_FIREBASE', JSON.stringify(chats));
+    try {
+      localStorage.setItem('DEV_AI_CHATS_V6_FIREBASE', JSON.stringify(chats));
+    } catch (e) {
+      console.warn('LocalStorage quota exceeded for chats, skipping local sync:', e);
+    }
+    
     if (currentUser) {
       const chatsRef = doc(db, 'users', currentUser.uid, 'data', 'chats');
       setDoc(chatsRef, { chats }, { merge: true }).catch(e => console.error(e));
     }
   }, [chats, currentUser]);
+
+  // Sync Trash to Local
+  useEffect(() => {
+    try {
+      localStorage.setItem('DEV_AI_TRASH_V6', JSON.stringify(trashedChats));
+    } catch (e) {
+      console.warn('LocalStorage quota exceeded for trash, skipping local sync:', e);
+    }
+  }, [trashedChats]);
 
   // Global Online Counter (Real-ish simulation based on recent presence)
   useEffect(() => {
@@ -715,6 +740,7 @@ function SidebarChatItem({ chat, activeChatId, setActiveChatId, setSidebarOpen, 
   moveToTrash: (id: string) => void;
   showToast: (m: string) => void;
 }) {
+  const { effectiveUserId } = useContext(AppContext);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const triggerRef = useRef<HTMLDivElement>(null);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
@@ -731,7 +757,7 @@ function SidebarChatItem({ chat, activeChatId, setActiveChatId, setSidebarOpen, 
     if (longPressTimer.current) clearTimeout(longPressTimer.current);
   };
 
-  const isShared = Boolean(chat.isShared || (chat.sharedUsers && chat.sharedUsers.length > 0) || chat.myRole);
+  const isShared = Boolean((chat.sharedUsers && chat.sharedUsers.length > 0) || (chat.ownerId && chat.ownerId !== effectiveUserId));
   const roleLabel = chat.myRole === 'viewer' ? 'Somente ver' : chat.myRole === 'editor' ? 'Editor' : 'Admin';
 
   return (
@@ -879,6 +905,24 @@ function ChatMessageItem({
     }
   }, [msg.timestamp]);
 
+  const [copied, setCopied] = useState(false);
+  const [isSpinning, setIsSpinning] = useState(false);
+
+  const onCopyClick = (text: string) => {
+    handleCopy(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const onRegenerateClick = () => {
+    setIsSpinning(true);
+    setTimeout(() => setIsSpinning(false), 800);
+    if (onRegenerate) onRegenerate();
+  };
+
+  const [isExpanded, setIsExpanded] = useState(false);
+  const isLong = msg.content && msg.content.length > 300;
+
   return (
     <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} space-y-1 group relative`}>
       {isUser ? (
@@ -892,9 +936,27 @@ function ChatMessageItem({
             {userSettings.userName}
           </span>
           <div className="relative group/bubble bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-neutral-900 dark:text-neutral-100 rounded-2xl px-4 py-2.5 text-sm max-w-[85%] shadow-xs space-y-2">
-            {/* Render user attachments if present */}
+            {msg.content && (
+              <div className={`relative ${isLong && !isExpanded ? 'max-h-[240px] overflow-hidden' : ''}`}>
+                {msg.content}
+                {isLong && !isExpanded && (
+                  <div className="absolute bottom-0 left-0 w-full pt-10 pb-1 bg-gradient-to-t from-neutral-100 dark:from-neutral-900 to-transparent" />
+                )}
+              </div>
+            )}
+            
+            {isLong && (
+              <button 
+                onClick={() => setIsExpanded(!isExpanded)}
+                className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 hover:underline pt-1 block"
+              >
+                {isExpanded ? 'Ver menos' : 'Ver mais'}
+              </button>
+            )}
+            
+            {/* Render user attachments below text */}
             {Array.isArray(msg.attachments) && msg.attachments.length > 0 && (
-              <div className="flex flex-wrap gap-2 pb-1">
+              <div className="flex flex-wrap gap-2 pt-1">
                 {msg.attachments.map((att: any, attIdx: number) => (
                   <div
                     key={att.id || attIdx}
@@ -919,15 +981,19 @@ function ChatMessageItem({
                 ))}
               </div>
             )}
-            {msg.content && <div>{msg.content}</div>}
           </div>
+          {/* ... (rest of user options bubble) */}
           <div className="flex items-center gap-1 pt-1 opacity-80 group-hover:opacity-100 transition-opacity">
             <button
-              onClick={() => handleCopy(msg.content)}
-              className="p-1 text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-900 transition-colors"
+              onClick={() => onCopyClick(msg.content)}
+              className={`p-1.5 rounded-lg border transition-all duration-300 ${
+                copied
+                  ? 'bg-emerald-500/20 text-emerald-500 border-emerald-500/40 scale-110 shadow-xs'
+                  : 'text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200 border-transparent hover:bg-neutral-100 dark:hover:bg-neutral-900'
+              }`}
               title="Copiar mensagem"
             >
-              <Copy className="w-3.5 h-3.5" />
+              {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
             </button>
             <button
               ref={triggerRef}
@@ -947,7 +1013,7 @@ function ChatMessageItem({
                 <span>{messageTime}</span>
               </div>
               <button
-                onClick={() => { handleCopy(msg.content); setIsMenuOpen(false); }}
+                onClick={() => { onCopyClick(msg.content); setIsMenuOpen(false); }}
                 className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
               >
                 <Copy className="w-3.5 h-3.5" />
@@ -979,29 +1045,60 @@ function ChatMessageItem({
             <span className="text-[11px] font-bold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">DEV AI</span>
           </div>
           <div className="text-neutral-800 dark:text-neutral-200 text-sm md:text-base leading-relaxed pl-1 w-full max-w-full overflow-x-hidden">
-            <MarkdownRenderer content={msg.content} chatId={chatId} userSettings={userSettings} isGenerating={isGenerating} />
+            <div className={`relative ${isLong && !isExpanded ? 'max-h-[300px] overflow-hidden' : ''}`}>
+               <MarkdownRenderer content={msg.content} chatId={chatId} userSettings={userSettings} isGenerating={isGenerating} />
+               {isLong && !isExpanded && (
+                  <div className="absolute bottom-0 left-0 w-full pt-10 pb-1 bg-gradient-to-t from-neutral-100 dark:from-neutral-900 to-transparent" />
+               )}
+            </div>
+            {isLong && (
+              <button 
+                onClick={() => setIsExpanded(!isExpanded)}
+                className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 hover:underline pt-1 block"
+              >
+                {isExpanded ? 'Ver menos' : 'Ver mais'}
+              </button>
+            )}
+            {/* Sources section */}
+            {Array.isArray(msg.sources) && msg.sources.length > 0 && (
+              <div className="mt-3 pt-3 border-t border-neutral-200 dark:border-neutral-800">
+                <div className="text-[10px] font-bold text-neutral-500 uppercase mb-2">Fontes</div>
+                <div className="flex flex-wrap gap-2">
+                   {msg.sources.map((s: any, i: number) => (
+                     <a key={i} href={s.url} target="_blank" className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 text-[10px] font-semibold text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200">
+                       <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
+                       {s.title}
+                     </a>
+                   ))}
+                </div>
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-1 mt-2 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
              <button
                onClick={() => handleTTS(index, msg.content)}
-               className={`p-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 transition-colors ${speakingIndex === index ? 'bg-emerald-500 text-white border-emerald-500 shadow-lg' : 'text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900'}`}
+               className={`p-1.5 rounded-lg border transition-all duration-300 ${speakingIndex === index ? 'bg-emerald-500 text-white border-emerald-500 shadow-lg animate-pulse' : 'text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900 border-neutral-200 dark:border-neutral-800'}`}
                title="Ouvir resposta"
              >
                <Volume2 className="w-4 h-4" />
              </button>
              <button
-               onClick={() => handleCopy(msg.content)}
-               className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 transition-colors"
+               onClick={() => onCopyClick(msg.content)}
+               className={`p-1.5 rounded-lg border transition-all duration-300 ${
+                 copied 
+                   ? 'bg-emerald-500/20 text-emerald-500 border-emerald-500/40 scale-110 shadow-xs' 
+                   : 'text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900 border-neutral-200 dark:border-neutral-800'
+               }`}
                title="Copiar resposta"
              >
-               <Copy className="w-4 h-4" />
+               {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
              </button>
              <button
-               onClick={() => onRegenerate && onRegenerate()}
-               className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 transition-colors"
+               onClick={onRegenerateClick}
+               className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 transition-all active:scale-95"
                title="Regenerar resposta"
              >
-               <RefreshCw className="w-4 h-4" />
+               <RefreshCw className={`w-4 h-4 transition-transform duration-700 ease-in-out ${isSpinning ? 'rotate-[360deg]' : ''}`} />
              </button>
 
              <div className="relative">
@@ -2298,41 +2395,54 @@ function PasteChoiceModal({
   };
 
   return (
-    <div className="fixed inset-0 z-[60000] bg-black/75 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4 animate-in fade-in duration-200 font-sans select-none">
-      <div className="bg-[#181818] border-t border-neutral-800 sm:border rounded-t-[32px] sm:rounded-[32px] w-full max-w-md p-6 sm:p-8 space-y-6 shadow-2xl relative text-white">
-        {/* Drag handle pill matching screenshot */}
-        <div className="w-10 h-1.5 bg-neutral-600/80 rounded-full mx-auto mb-2" />
-
-        <div className="space-y-2 text-left">
-          <h3 className="text-xl font-bold text-white tracking-tight">Texto grande</h3>
-          <p className="text-sm text-neutral-300 font-normal leading-relaxed">
-            O texto que está colando é um pouco grande. Gostaria de anexá-lo como um arquivo?
-          </p>
+    <div className="fixed inset-0 z-[60000] bg-black/70 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200 select-none font-sans">
+      <div className="bg-white dark:bg-[#18181b] border border-neutral-200 dark:border-neutral-800 rounded-3xl w-full max-w-sm p-5 space-y-4 shadow-2xl relative text-neutral-900 dark:text-white">
+        
+        {/* Header with Title and 'X' Close button */}
+        <div className="flex items-center justify-between pb-1 border-b border-neutral-100 dark:border-neutral-800/80">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-xl bg-purple-500/10 dark:bg-purple-500/20 text-purple-600 dark:text-purple-400 border border-purple-500/30 flex items-center justify-center shrink-0">
+              <FileText className="w-4 h-4" />
+            </div>
+            <h3 className="text-base font-bold tracking-tight">Texto Grande Colado</h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1.5 text-neutral-400 hover:text-neutral-900 dark:hover:text-white rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+            title="Fechar sem colar"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
 
-        <div className="space-y-3.5 pt-1">
-          {/* Main White Pill Button matching screenshot */}
+        <p className="text-xs text-neutral-600 dark:text-neutral-300 leading-relaxed">
+          O texto colado é longo ({modalData.text?.length || 0} caracteres). Como você deseja colar?
+        </p>
+
+        <div className="space-y-2 pt-1">
           <button
             type="button"
             onClick={handleActionFile}
-            className="w-full bg-white hover:bg-neutral-200 active:scale-[0.98] text-neutral-950 font-semibold text-base py-4 rounded-full transition-all shadow-md text-center"
+            className="w-full flex items-center justify-center gap-2 bg-neutral-900 hover:bg-neutral-800 dark:bg-white dark:hover:bg-neutral-200 text-white dark:text-neutral-950 font-bold text-xs py-3 rounded-2xl transition-all shadow-md active:scale-95"
           >
-            Anexar como Arquivo
+            <Paperclip className="w-4 h-4" />
+            <span>Anexar como Arquivo</span>
           </button>
 
-          {/* Secondary Dark Grey Pill Button matching screenshot */}
           <button
             type="button"
             onClick={handleActionText}
-            className="w-full bg-[#2c2c2c] hover:bg-[#3c3c3c] active:scale-[0.98] text-white font-semibold text-base py-4 rounded-full transition-all text-center"
+            className="w-full flex items-center justify-center gap-2 bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-800 dark:text-white font-semibold text-xs py-3 rounded-2xl transition-all active:scale-95"
           >
-            Colar como texto
+            <FileText className="w-4 h-4" />
+            <span>Colar no texto</span>
           </button>
         </div>
 
-        {/* Bottom Toggle Row matching screenshot: Lembrar minha escolha */}
-        <div className="flex items-center justify-between pt-4 border-t border-neutral-800/80">
-          <span className="text-sm font-medium text-neutral-300">Lembrar minha escolha</span>
+        {/* Bottom Toggle Row: Lembrar escolha */}
+        <div className="flex items-center justify-between pt-3 border-t border-neutral-100 dark:border-neutral-800/80 text-xs">
+          <span className="font-medium text-neutral-500 dark:text-neutral-400">Lembrar minha escolha</span>
           <button
             type="button"
             onClick={() => {
@@ -2340,11 +2450,11 @@ function PasteChoiceModal({
               setRememberChoice(next);
               if (!next) localStorage.removeItem('DEV_AI_REMEMBER_PASTE');
             }}
-            className={`w-12 h-7 rounded-full p-1 transition-colors duration-200 flex items-center ${
-              rememberChoice ? 'bg-white justify-end' : 'bg-[#333333] justify-start'
+            className={`w-10 h-5 rounded-full p-0.5 transition-colors duration-200 flex items-center ${
+              rememberChoice ? 'bg-emerald-500 justify-end' : 'bg-neutral-300 dark:bg-neutral-700 justify-start'
             }`}
           >
-            <div className={`w-5 h-5 rounded-full transition-all ${rememberChoice ? 'bg-black' : 'bg-neutral-400'}`} />
+            <div className="w-4 h-4 rounded-full bg-white shadow-xs" />
           </button>
         </div>
       </div>
@@ -2441,33 +2551,52 @@ function ChatInput({
     setInputText(inputText ? `${inputText}\n${text}` : text);
   };
 
-  const handleChooseFile = (text?: string, files?: File[]) => {
+  const handleChooseFile = async (text?: string, files?: File[]) => {
     const newAtts: any[] = [];
     if (files && files.length > 0) {
-      files.forEach(f => {
+      for (const f of files) {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(f);
+        });
         newAtts.push({
           id: 'att_' + Date.now() + Math.random().toString(36).substring(7),
           name: f.name || `arquivo_${Date.now()}`,
           size: `${(f.size / 1024).toFixed(1)} KB`,
           type: f.type.startsWith('image/') ? 'image' : f.type.startsWith('video/') ? 'video' : 'doc',
-          url: URL.createObjectURL(f)
+          url: dataUrl
         });
-      });
+      }
     }
     if (text && text.trim()) {
       const blob = new Blob([text], { type: 'text/plain' });
+      const base64Text = btoa(unescape(encodeURIComponent(text)));
+      const dataUrl = `data:text/plain;charset=utf-8;base64,${base64Text}`;
       newAtts.push({
         id: 'att_' + Date.now(),
         name: `texto_colado_${Date.now()}.txt`,
         size: `${(blob.size / 1024).toFixed(1)} KB`,
         type: 'doc',
-        url: URL.createObjectURL(blob)
+        url: dataUrl,
+        rawText: text
       });
     }
     if (newAtts.length > 0) {
       setAttachments(prev => [...prev, ...newAtts]);
     }
   };
+
+  // Save input to localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem('DEV_AI_INPUT_PERSIST');
+    if (saved) setInputText(saved);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('DEV_AI_INPUT_PERSIST', inputText);
+  }, [inputText]);
 
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -2478,18 +2607,27 @@ function ChatInput({
     if (!inputText.trim() && attachments.length === 0) return;
     onSendMessage(inputText.trim(), attachments);
     setInputText('');
+    localStorage.removeItem('DEV_AI_INPUT_PERSIST');
     setAttachments([]);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    const newAttachments = files.map(file => ({
-      id: Math.random().toString(36).substring(7),
-      name: file.name,
-      size: (file.size / 1024).toFixed(1) + ' KB',
-      type: file.type.startsWith('image/') ? 'image' : file.type.startsWith('video/') ? 'video' : 'doc',
-      url: URL.createObjectURL(file)
+    const newAttachments = await Promise.all(files.map(async (file) => {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      return {
+        id: Math.random().toString(36).substring(7),
+        name: file.name,
+        size: (file.size / 1024).toFixed(1) + ' KB',
+        type: file.type.startsWith('image/') ? 'image' : file.type.startsWith('video/') ? 'video' : 'doc',
+        url: dataUrl
+      };
     }));
     setAttachments(prev => [...prev, ...newAttachments]);
     setAttachmentMenuOpen(false);
@@ -2615,7 +2753,7 @@ function ChatInput({
   };
 
   return (
-    <div className="p-3 md:p-4 bg-transparent">
+    <div className="p-3 md:p-4 bg-white dark:bg-neutral-950 border-t border-neutral-200/80 dark:border-neutral-900 relative z-20">
       <PasteChoiceModal
         modalData={pasteModalData}
         onClose={() => setPasteModalData(null)}
@@ -2682,68 +2820,68 @@ function ChatInput({
           </div>
         )}
 
-        {/* Live Audio Wave Visualizer bar moving right with voice bass */}
-        {isRecordingAudio && (
-          <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-neutral-900 border border-emerald-500/40 rounded-2xl mb-2.5 animate-in fade-in duration-300 shadow-xl">
-            <div className="flex items-center gap-2 shrink-0">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping" />
-              <span className="text-[11px] font-extrabold text-emerald-400 uppercase tracking-widest">Ouvindo...</span>
-            </div>
-
-            {/* Soundwave bars moving to the right according to bass volume */}
-            <div className="flex-1 flex items-center justify-center gap-1 h-8 overflow-hidden px-2">
-              {waveBars.map((h, idx) => (
-                <div
-                  key={idx}
-                  className="w-1.5 rounded-full transition-all duration-75"
-                  style={{
-                    height: `${h}px`,
-                    backgroundColor: idx === 0 ? '#10b981' : idx < 6 ? '#34d399' : idx < 14 ? '#60a5fa' : '#a855f7',
-                    opacity: Math.max(0.35, 1 - (idx * 0.025))
-                  }}
-                />
-              ))}
-            </div>
-
-            <button
-              type="button"
-              onClick={stopVoiceRecording}
-              className="px-3.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs rounded-xl transition-all shrink-0 shadow-md active:scale-95"
-            >
-              Concluir
-            </button>
-          </div>
-        )}
-
         <form
           onSubmit={handleSubmit}
-          className="relative bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-800 rounded-3xl p-3 shadow-lg transition-all focus-within:border-neutral-400 dark:focus-within:border-neutral-700"
+          className="relative bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-3xl p-3 shadow-sm transition-all"
         >
-          <div className="relative flex items-start">
-            <textarea
-              ref={textareaRef}
-              rows={1}
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              disabled={isViewer}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSubmit();
-                }
-              }}
-              onPaste={(e) => {
-                const pastedText = e.clipboardData.getData('text');
-                const pastedFiles = Array.from(e.clipboardData.files || []);
-                if (pastedFiles.length > 0 || (pastedText && pastedText.length > 250)) {
-                  e.preventDefault();
-                  setPasteModalData({ text: pastedText, files: pastedFiles });
-                }
-              }}
-              placeholder={isViewer ? 'Apenas leitura (Visualizador)...' : isRecordingAudio ? 'Ouvindo áudio... Fale agora' : 'Escreva uma mensagem...'}
-              className="w-full bg-transparent text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-500 px-3 py-2 text-sm focus:outline-none resize-none overflow-y-auto max-h-32 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-              style={{ fontWeight: settings.boldFont ? 'bold' : '500' }}
-            />
+          <div className="relative flex items-center">
+            {isRecordingAudio ? (
+              /* RED soundwave bars INSIDE the input where text appears */
+              <div className="w-full flex items-center justify-between gap-3 px-2 py-1 min-h-[42px] animate-in fade-in duration-200">
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
+                  <span className="text-xs font-bold text-red-500 uppercase tracking-wider">Ouvindo...</span>
+                </div>
+
+                {/* RED soundwave bars flowing right with voice bass */}
+                <div className="flex-1 flex items-center justify-center gap-1 h-7 overflow-hidden px-2">
+                  {waveBars.map((h, idx) => (
+                    <div
+                      key={idx}
+                      className="w-1.5 rounded-full transition-all duration-75"
+                      style={{
+                        height: `${h}px`,
+                        backgroundColor: idx === 0 ? '#ef4444' : idx < 8 ? '#f87171' : idx < 16 ? '#dc2626' : '#b91c1c',
+                        opacity: Math.max(0.4, 1 - (idx * 0.025))
+                      }}
+                    />
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={stopVoiceRecording}
+                  className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white font-bold text-xs rounded-xl transition-all shrink-0 shadow-xs active:scale-95"
+                >
+                  Concluir
+                </button>
+              </div>
+            ) : (
+              <textarea
+                ref={textareaRef}
+                rows={1}
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                disabled={isViewer}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSubmit();
+                  }
+                }}
+                onPaste={(e) => {
+                  const pastedText = e.clipboardData.getData('text');
+                  const pastedFiles = Array.from(e.clipboardData.files || []);
+                  if (pastedFiles.length > 0 || (pastedText && pastedText.length > 250)) {
+                    e.preventDefault();
+                    setPasteModalData({ text: pastedText, files: pastedFiles });
+                  }
+                }}
+                placeholder={isViewer ? 'Apenas leitura (Visualizador)...' : 'Escreva uma mensagem...'}
+                className="w-full bg-transparent text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-500 px-3 py-2 text-sm focus:outline-none resize-none overflow-y-auto max-h-32 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ fontWeight: settings.boldFont ? 'bold' : '500' }}
+              />
+            )}
 
             <button
               type="button"
@@ -2771,17 +2909,17 @@ function ChatInput({
                 </button>
 
                 {attachmentMenuOpen && (
-                  <div className="absolute left-0 bottom-12 w-48 bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl py-2 z-40 text-xs space-y-1">
+                  <div className="absolute left-0 bottom-12 w-56 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-3xl shadow-2xl py-3 z-40 text-xs space-y-1 overflow-hidden">
                     <button
                       type="button"
                       onClick={() => {
                         setImageGenModalOpen(true);
                         setAttachmentMenuOpen(false);
                       }}
-                      className="w-full flex items-center gap-3 px-3 py-2 text-white hover:bg-neutral-800 transition-colors"
+                      className="w-full flex items-center gap-3 px-4 py-3 text-neutral-900 dark:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
                     >
-                      <Sparkles className="w-4 h-4 text-white" />
-                      <span className="text-white font-medium">Criar Imagem</span>
+                      <Sparkles className="w-4 h-4 text-purple-500" />
+                      <span className="font-semibold">Criar Imagem</span>
                     </button>
                     <button
                       type="button"
@@ -2791,10 +2929,10 @@ function ChatInput({
                           fileInputRef.current.click();
                         }
                       }}
-                      className="w-full flex items-center gap-3 px-3 py-2 text-white hover:bg-neutral-800 transition-colors"
+                      className="w-full flex items-center gap-3 px-4 py-3 text-neutral-900 dark:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
                     >
-                      <Image className="w-4 h-4 text-white" />
-                      <span className="text-white font-medium">Fotos e Vídeos</span>
+                      <Paperclip className="w-4 h-4 text-blue-500" />
+                      <span className="font-semibold">Anexar Mídia</span>
                     </button>
                     <button
                       type="button"
@@ -2804,10 +2942,10 @@ function ChatInput({
                           fileInputRef.current.click();
                         }
                       }}
-                      className="w-full flex items-center gap-3 px-3 py-2 text-white hover:bg-neutral-800 transition-colors"
+                      className="w-full flex items-center gap-3 px-4 py-3 text-neutral-900 dark:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
                     >
-                      <FileText className="w-4 h-4 text-white" />
-                      <span className="text-white font-medium">Arquivos</span>
+                      <FileText className="w-4 h-4 text-emerald-500" />
+                      <span className="font-semibold">Arquivos</span>
                     </button>
                     <button
                       type="button"
@@ -2815,10 +2953,10 @@ function ChatInput({
                         setCameraModalOpen(true);
                         setAttachmentMenuOpen(false);
                       }}
-                      className="w-full flex items-center gap-3 px-3 py-2 text-white hover:bg-neutral-800 transition-colors"
+                      className="w-full flex items-center gap-3 px-4 py-3 text-neutral-900 dark:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
                     >
-                      <Camera className="w-4 h-4 text-white" />
-                      <span className="text-white font-medium">Câmera</span>
+                      <Camera className="w-4 h-4 text-orange-500" />
+                      <span className="font-semibold">Câmera</span>
                     </button>
                   </div>
                 )}
@@ -2917,7 +3055,6 @@ function SettingsModal() {
     { id: 'ia', label: 'Chat e IA', icon: MessageSquare, desc: 'Modelos e comportamento' },
     { id: 'voz', label: 'Áudio e Voz', icon: Volume2, desc: 'TTS e comandos de voz' },
     { id: 'conta', label: 'Minha Conta', icon: User, desc: 'Perfil e sincronização' },
-    { id: 'privacidade', label: 'Privacidade', icon: Shield, desc: 'Segurança e dados' },
     { id: 'notificacoes', label: 'Notificações', icon: Radio, desc: 'Alertas e sons' },
     { id: 'lixeira', label: 'Lixeira', icon: Trash2, desc: 'Chats excluídos' },
   ];
@@ -2977,24 +3114,35 @@ function SettingsModal() {
           <div className="space-y-8 animate-in slide-in-from-right duration-300">
             <section className="space-y-4">
               <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest">Modelo Padrão</h5>
-              <div className="space-y-2">
-                {availableModels.slice(0, 5).map((m) => (
-                  <button
-                    key={m.name}
-                    onClick={() => setSettings({ ...settings, selectedModel: m.name })}
-                    className={`w-full flex items-center justify-between p-4 rounded-2xl border-2 transition-all ${
-                      settings.selectedModel === m.name
-                        ? 'border-neutral-900 dark:border-white bg-neutral-50 dark:bg-neutral-900'
-                        : 'border-neutral-100 dark:border-neutral-900 hover:border-neutral-200 dark:hover:border-neutral-800'
-                    }`}
-                  >
-                    <div className="text-left min-w-0 flex-1">
-                      <div className="font-bold text-sm text-neutral-900 dark:text-white truncate">{m.displayName}</div>
-                      <div className="text-[10px] text-neutral-500 truncate">{m.description}</div>
-                    </div>
-                    {settings.selectedModel === m.name && <Check className="w-5 h-5 text-emerald-500 shrink-0 ml-2" />}
-                  </button>
-                ))}
+              <div className="space-y-4">
+                 <div>
+                    <label className="text-[10px] font-bold text-neutral-500 uppercase block mb-1">Personalidade da IA</label>
+                    <textarea 
+                      value={settings.personalityPrompt} 
+                      onChange={(e) => setSettings({...settings, personalityPrompt: e.target.value})}
+                      className="w-full p-3 rounded-xl bg-neutral-100 dark:bg-neutral-800 text-xs text-neutral-900 dark:text-neutral-100 focus:outline-none"
+                      rows={3}
+                    />
+                 </div>
+                 <div className="space-y-2">
+                    {availableModels.slice(0, 5).map((m) => (
+                      <button
+                        key={m.name}
+                        onClick={() => setSettings({ ...settings, selectedModel: m.name })}
+                        className={`w-full flex items-center justify-between p-4 rounded-2xl border-2 transition-all ${
+                          settings.selectedModel === m.name
+                            ? 'border-neutral-900 dark:border-white bg-neutral-50 dark:bg-neutral-900'
+                            : 'border-neutral-100 dark:border-neutral-900 hover:border-neutral-200 dark:hover:border-neutral-800'
+                        }`}
+                      >
+                        <div className="text-left min-w-0 flex-1">
+                          <div className="font-bold text-sm text-neutral-900 dark:text-white truncate">{m.displayName}</div>
+                          <div className="text-[10px] text-neutral-500 truncate">{m.description}</div>
+                        </div>
+                        {settings.selectedModel === m.name && <Check className="w-5 h-5 text-emerald-500 shrink-0 ml-2" />}
+                      </button>
+                    ))}
+                 </div>
               </div>
             </section>
 
@@ -3352,13 +3500,13 @@ function ModelSelectorModal() {
   const [activeCategory, setActiveCategory] = useState<string>('Todos');
 
   const models = [
-    { name: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', category: 'Flash', badge: 'FLASH', description: 'Última geração topo de linha com raciocínio rápido e multimodalidade' },
-    { name: 'gemini-3.5-pro', displayName: 'Gemini 3.5 Pro', category: 'Pro', badge: 'PRO', description: 'Raciocínio complexo, lógica profunda e programação avançada' },
-    { name: 'gemini-3.5-flash', displayName: 'Gemini 3.5 Flash', category: 'Flash', badge: 'FLASH', description: 'Velocidade máxima com alta inteligência para o dia a dia' },
-    { name: 'gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash-Lite', category: 'Lite', badge: 'LITE', description: 'Ultrarrápido, leve e econômico com menor consumo' },
-    { name: 'gemini-3.1-pro', displayName: 'Gemini 3.1 Pro', category: 'Pro', badge: 'PRO', description: 'Capacidade analítica avançada e pensamento estruturado' },
-    { name: 'gemini-3.1-flash', displayName: 'Gemini 3.1 Flash', category: 'Flash', badge: 'FLASH', description: 'Modelo ágil e balanceado para conversação rápida' },
-    { name: 'gemini-3.1-flash-lite', displayName: 'Gemini 3.1 Flash-Lite', category: 'Lite', badge: 'LITE', description: 'Ultra leve, resposta imediata e baixa latência' }
+    { name: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', category: 'Flash', badge: 'FLASH', description: 'Última geração topo de linha' },
+    { name: 'gemini-3.5-pro', displayName: 'Gemini 3.5 Pro', category: 'Pro', badge: 'PRO', description: 'Raciocínio complexo e lógica avançada' },
+    { name: 'gemini-3.5-flash', displayName: 'Gemini 3.5 Flash', category: 'Flash', badge: 'FLASH', description: 'Velocidade e inteligência' },
+    { name: 'gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash-Lite', category: 'Lite', badge: 'LITE', description: 'Ultra leve e rápido' },
+    { name: 'gemini-3.1-pro', displayName: 'Gemini 3.1 Pro', category: 'Pro', badge: 'PRO', description: 'Capacidade analítica avançada' },
+    { name: 'gemini-3.1-flash', displayName: 'Gemini 3.1 Flash', category: 'Flash', badge: 'FLASH', description: 'Equilibrado e rápido' },
+    { name: 'gemini-3.1-flash-lite', displayName: 'Gemini 3.1 Flash-Lite', category: 'Lite', badge: 'LITE', description: 'Resposta imediata' }
   ];
 
   if (!modelSelectorOpen) return null;
@@ -3444,8 +3592,15 @@ function ShareModal() {
 
   const [targetUserId, setTargetUserId] = useState('');
   const [selectedRole, setSelectedRole] = useState<'viewer' | 'editor' | 'admin'>('editor');
+  const [copiedId, setCopiedId] = useState(false);
 
   if (!shareModalOpen || !activeChat) return null;
+
+  const handleCopyMyId = () => {
+    navigator.clipboard.writeText(myUserId);
+    setCopiedId(true);
+    setTimeout(() => setCopiedId(false), 2000);
+  };
 
   const handleAddUser = (e: React.FormEvent) => {
     e.preventDefault();
@@ -3464,149 +3619,72 @@ function ShareModal() {
   const sharedUsers = Array.isArray(activeChat.sharedUsers) ? activeChat.sharedUsers : [];
 
   return (
-    <div className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-      <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-[2.5rem] w-full max-w-lg p-6 md:p-8 space-y-6 shadow-[0_0_60px_rgba(0,0,0,0.5)] animate-in zoom-in-95 duration-300">
+    <div className="fixed inset-0 z-[110] bg-black/60 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200 font-sans">
+      <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-[2.5rem] w-full max-w-lg p-6 md:p-8 space-y-6 shadow-2xl relative text-neutral-900 dark:text-neutral-100">
         
-        {/* Header */}
-        <div className="flex items-center justify-between pb-3 border-b border-neutral-100 dark:border-neutral-800">
+        <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-500 shadow-xs">
-              <UserCheck className="w-5 h-5 text-emerald-500" />
+            <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 flex items-center justify-center">
+              <Share2 className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="font-bold text-base text-neutral-900 dark:text-white tracking-tight">Compartilhar Conversa</h3>
-              <p className="text-[11px] text-neutral-500">Conceda acesso por ID de usuário com permissões personalizadas</p>
+              <h3 className="font-black text-lg">Compartilhar Conversa</h3>
+              <p className="text-[10px] text-neutral-500 font-bold uppercase tracking-widest">Conceda acesso por ID de usuário</p>
             </div>
           </div>
-          <button
-            onClick={() => setShareModalOpen(false)}
-            className="p-2 text-neutral-400 hover:text-neutral-900 dark:hover:text-white rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
-          >
+          <button onClick={() => setShareModalOpen(false)} className="p-2 text-neutral-400 hover:text-neutral-900 dark:hover:text-white bg-neutral-100 dark:bg-neutral-800 rounded-full">
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Seu ID de Usuário */}
-        <div className="p-3 bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-2xl flex items-center justify-between text-xs">
+        <div className="p-4 bg-neutral-50 dark:bg-neutral-950 rounded-2xl border border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
           <div>
-            <span className="text-[10px] text-neutral-400 font-bold uppercase tracking-wider block">Seu ID de Usuário</span>
-            <span className="font-mono font-bold text-neutral-900 dark:text-neutral-100">{myUserId}</span>
+            <span className="text-[10px] font-black text-neutral-400 uppercase">Seu ID de Usuário</span>
+            <div className="font-mono font-bold text-xs">{myUserId}</div>
           </div>
-          <button
-            onClick={() => {
-              navigator.clipboard.writeText(myUserId);
-              showToast('Seu ID copiado!');
-            }}
-            className="px-3 py-1.5 rounded-xl bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 text-neutral-700 dark:text-neutral-200 font-bold text-xs hover:bg-neutral-100 dark:hover:bg-neutral-700 transition-colors flex items-center gap-1.5 shadow-xs"
-          >
-            <Copy className="w-3.5 h-3.5" />
-            <span>Copiar meu ID</span>
+          <button onClick={handleCopyMyId} className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all ${copiedId ? 'bg-emerald-500 text-white' : 'bg-white dark:bg-neutral-800'}`}>
+            {copiedId ? <CheckCheck className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+            {copiedId ? 'Copiado!' : 'Copiar'}
           </button>
         </div>
 
-        {/* Formulário para Adicionar Usuário e Escolher Permissão */}
         <form onSubmit={handleAddUser} className="space-y-4">
-          <div className="space-y-2">
-            <label className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">
-              ID do Usuário a convidar
-            </label>
-            <input
-              type="text"
-              value={targetUserId}
-              onChange={(e) => setTargetUserId(e.target.value)}
-              placeholder="Digite o ID do usuário (ex: user_8f3a9b)"
-              className="w-full bg-white dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100 border border-neutral-200 dark:border-neutral-800 rounded-2xl px-4 py-3 text-xs focus:outline-none focus:border-neutral-500 dark:focus:border-neutral-400"
-            />
+          <input
+            type="text"
+            value={targetUserId}
+            onChange={(e) => setTargetUserId(e.target.value)}
+            placeholder="Digite o ID do usuário (ex: user_8f3a9b)"
+            className="w-full bg-neutral-100 dark:bg-neutral-800 rounded-2xl px-4 py-4 text-xs font-bold focus:outline-none"
+          />
+
+          <div className="grid grid-cols-3 gap-2">
+            {[
+              { id: 'viewer', title: 'Somente Ver', icon: Eye },
+              { id: 'editor', title: 'Editor', icon: Edit2 },
+              { id: 'admin', title: 'Admin', icon: Settings }
+            ].map(opt => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => setSelectedRole(opt.id as any)}
+                className={`p-4 rounded-2xl border-2 flex flex-col items-center gap-2 ${
+                  selectedRole === opt.id ? 'border-emerald-500 bg-emerald-500/5' : 'border-transparent bg-neutral-100 dark:bg-neutral-800'
+                }`}
+              >
+                <opt.icon className={`w-5 h-5 ${selectedRole === opt.id ? 'text-emerald-500' : 'text-neutral-500'}`} />
+                <span className="text-[10px] font-bold">{opt.title}</span>
+                {selectedRole === opt.id && <CheckCircle2 className="w-4 h-4 text-emerald-500" />}
+              </button>
+            ))}
           </div>
 
-          <div className="space-y-2">
-            <label className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">
-              Nível de Permissão
-            </label>
-            <div className="grid grid-cols-3 gap-2">
-              {[
-                { id: 'viewer', title: 'Somente ver', desc: 'Apenas leitura' },
-                { id: 'editor', title: 'Editor', desc: 'Lê e envia msg' },
-                { id: 'admin', title: 'Administrador', desc: 'Envia e compartilha' }
-              ].map(opt => (
-                <button
-                  key={opt.id}
-                  type="button"
-                  onClick={() => setSelectedRole(opt.id as any)}
-                  className={`p-3 rounded-2xl border text-left transition-all ${
-                    selectedRole === opt.id
-                      ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800 text-neutral-900 dark:text-white shadow-sm'
-                      : 'border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-950/60 text-neutral-500 hover:border-neutral-300'
-                  }`}
-                >
-                  <div className="font-bold text-xs">{opt.title}</div>
-                  <div className="text-[10px] opacity-70 mt-0.5">{opt.desc}</div>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <button
-            type="submit"
-            disabled={!targetUserId.trim()}
-            className="w-full py-3 bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 font-bold text-xs rounded-2xl shadow-lg hover:scale-[1.01] active:scale-[0.99] disabled:opacity-40 transition-all flex items-center justify-center gap-2"
-          >
-            <UserPlus className="w-4 h-4" />
-            <span>Adicionar Acesso</span>
+          <button type="submit" className="w-full py-4 rounded-2xl bg-emerald-500 text-white font-black text-xs shadow-lg hover:bg-emerald-600 transition-all">
+            Adicionar Acesso
           </button>
         </form>
 
-        {/* Lista de Usuários com Acesso nesta conversa */}
-        <div className="space-y-2 pt-2 border-t border-neutral-100 dark:border-neutral-800">
-          <div className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider">
-            Usuários com Acesso ({sharedUsers.length})
-          </div>
-
-          {sharedUsers.length === 0 ? (
-            <div className="p-4 text-center text-xs text-neutral-400 bg-neutral-50 dark:bg-neutral-950/50 rounded-2xl border border-neutral-100 dark:border-neutral-800/80">
-              Nenhum usuário compartilhado ainda. Adicione pelo ID acima.
-            </div>
-          ) : (
-            <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
-              {sharedUsers.map((u: any) => (
-                <div key={u.userId} className="flex items-center justify-between p-3 bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-2xl text-xs">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <div className="w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-500 border border-emerald-500/40 flex items-center justify-center shrink-0">
-                      <UserCheck className="w-3.5 h-3.5 text-emerald-500" />
-                    </div>
-                    <span className="font-mono text-neutral-900 dark:text-neutral-200 truncate">{u.userId}</span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={u.role}
-                      onChange={(e) => updateSharedUserRole(activeChat.id, u.userId, e.target.value as any)}
-                      className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 text-neutral-800 dark:text-neutral-200 text-[11px] font-semibold rounded-lg px-2 py-1 focus:outline-none"
-                    >
-                      <option value="viewer">Somente ver</option>
-                      <option value="editor">Editor</option>
-                      <option value="admin">Administrador</option>
-                    </select>
-
-                    <button
-                      onClick={() => removeSharedUser(activeChat.id, u.userId)}
-                      className="p-1.5 text-neutral-400 hover:text-red-500 rounded-lg hover:bg-neutral-200 dark:hover:bg-neutral-800 transition-colors"
-                      title="Remover acesso"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <button 
-          onClick={() => setShareModalOpen(false)}
-          className="w-full py-2.5 text-[11px] font-bold text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 tracking-wider text-center"
-        >
-          CONCLUÍDO
+        <button onClick={() => setShareModalOpen(false)} className="w-full py-4 rounded-2xl bg-neutral-100 dark:bg-neutral-800 font-black text-xs text-neutral-500 hover:text-neutral-900 dark:hover:text-white">
+          Concluído
         </button>
       </div>
     </div>
@@ -3647,6 +3725,51 @@ function AppContent() {
     setInputText('');
   };
 
+  const triggerStreamAiResponse = async (chatId: string, history: any[]) => {
+    setIsGenerating(true);
+    setGenerationState('Pensando...');
+
+    let assistantContent = '';
+    let hasCreatedAssistant = false;
+
+    try {
+      await aiProvider.streamResponse(
+        history,
+        (chunk) => {
+          assistantContent += chunk;
+          setChats((prev: any) => prev.map((c: any) => {
+            if (c.id === chatId) {
+              const updatedMsgs = [...c.messages];
+              if (!hasCreatedAssistant) {
+                hasCreatedAssistant = true;
+                updatedMsgs.push({
+                  role: 'assistant',
+                  content: assistantContent,
+                  timestamp: new Date().toISOString()
+                });
+              } else {
+                updatedMsgs[updatedMsgs.length - 1] = {
+                  ...updatedMsgs[updatedMsgs.length - 1],
+                  content: assistantContent
+                };
+              }
+              return { ...c, messages: updatedMsgs };
+            }
+            return c;
+          }));
+        },
+        (stateText) => setGenerationState(stateText),
+        (error) => showToast(error),
+        settings.selectedModel,
+        settings.personalityPrompt
+      );
+    } catch (err) {
+      console.error('Stream error:', err);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
   const handleSendMessage = async (userInputText: string, param2?: any[] | string, param3?: string) => {
     let customAttachments: any[] = [];
     let customChatId: string | undefined = undefined;
@@ -3661,28 +3784,37 @@ function AppContent() {
     let chatId = customChatId || activeChatId;
     if (!chatId) chatId = createNewChat();
 
-    // If editing a message, update in place without erasing anything
+    // If editing a message, update message, truncate history after it, and re-generate AI response
     if (editingMessage !== null) {
+      const editIdx = editingMessage.index;
+      setEditingMessage(null);
+      setInputText('');
+
+      let historyToStream: any[] = [];
+
       setChats((prev: any) => prev.map((c: any) => {
         if (c.id === chatId) {
-          const updated = [...c.messages];
-          if (updated[editingMessage.index]) {
-            updated[editingMessage.index] = {
-              ...updated[editingMessage.index],
+          const updated = c.messages.slice(0, editIdx + 1);
+          if (updated[editIdx]) {
+            updated[editIdx] = {
+              ...updated[editIdx],
               content: userInputText,
               editedAt: new Date().toISOString()
             };
           }
+          historyToStream = updated;
           return { ...c, messages: updated };
         }
         return c;
       }));
-      setEditingMessage(null);
-      setInputText('');
+
+      setTimeout(() => {
+        triggerStreamAiResponse(chatId, historyToStream);
+      }, 50);
       return;
     }
 
-    const finalContent = userInputText.trim() || (customAttachments.length > 0 ? `Analise ${customAttachments.length === 1 ? 'esta foto capturada' : 'estas fotos capturadas'}:` : '');
+    const finalContent = userInputText.trim();
 
     const userMsg = {
       role: 'user',
@@ -3700,13 +3832,17 @@ function AppContent() {
       return c;
     }));
 
-    setIsGenerating(true);
-
     const currentChat = chats.find((c: any) => c.id === chatId);
-    const existingMsgs = currentChat ? currentChat.messages.filter((m: any) => (m.content && m.content.trim()) || (Array.isArray(m.attachments) && m.attachments.length > 0)) : [];
-    const history = [...existingMsgs, userMsg];
+    // Include attachments in history properly for backend to read
+    const existingMsgs = currentChat ? currentChat.messages.map((m: any) => ({
+      ...m,
+      attachments: m.attachments || []
+    })) : [];
+    
+    const history = [...existingMsgs.filter((m: any) => m.content || (m.attachments && m.attachments.length > 0))];
 
     if (finalContent.startsWith('[IMAGE_GEN')) {
+      setIsGenerating(true);
       const match = finalContent.match(/^\[IMAGE_GEN(?::([^\]]+))?\]\s*(.*)$/);
       const ratio = match?.[1] || '1:1';
       const prompt = match?.[2] || finalContent.replace('[IMAGE_GEN]', '').trim();
@@ -3748,54 +3884,26 @@ function AppContent() {
       return;
     }
 
-    let assistantContent = '';
-    let hasCreatedAssistant = false;
-
-    try {
-      await aiProvider.streamResponse(
-        history,
-        (chunk) => {
-          assistantContent += chunk;
-          setChats((prev: any) => prev.map((c: any) => {
-            if (c.id === chatId) {
-              const updatedMsgs = [...c.messages];
-              if (!hasCreatedAssistant) {
-                hasCreatedAssistant = true;
-                updatedMsgs.push({
-                  role: 'assistant',
-                  content: assistantContent,
-                  timestamp: new Date().toISOString()
-                });
-              } else {
-                updatedMsgs[updatedMsgs.length - 1] = {
-                  ...updatedMsgs[updatedMsgs.length - 1],
-                  content: assistantContent
-                };
-              }
-              return { ...c, messages: updatedMsgs };
-            }
-            return c;
-          }));
-        },
-        (stateText) => setGenerationState(stateText),
-        settings.selectedModel,
-        settings.personalityPrompt
-      );
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsGenerating(false);
-    }
+    triggerStreamAiResponse(chatId, history);
   };
 
   const handleRegenerate = () => {
     if (!activeChat || activeChat.messages.length === 0) return;
     const lastUserIndex = [...activeChat.messages].map((m, idx) => m.role === 'user' ? idx : -1).filter(i => i !== -1).pop();
     if (lastUserIndex !== undefined) {
-      const lastUserMsg = activeChat.messages[lastUserIndex];
-      const truncated = activeChat.messages.slice(0, lastUserIndex);
-      setChats((prev: any) => prev.map((c: any) => c.id === activeChat.id ? { ...c, messages: truncated } : c));
-      handleSendMessage(lastUserMsg.content, activeChat.id);
+      let historyToStream: any[] = [];
+      setChats((prev: any) => prev.map((c: any) => {
+        if (c.id === activeChat.id) {
+          const truncated = c.messages.slice(0, lastUserIndex + 1);
+          historyToStream = truncated;
+          return { ...c, messages: truncated };
+        }
+        return c;
+      }));
+
+      setTimeout(() => {
+        triggerStreamAiResponse(activeChat.id, historyToStream);
+      }, 50);
     }
   };
 
