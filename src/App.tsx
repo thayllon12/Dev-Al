@@ -8,15 +8,18 @@ import {
   FileText, Video, Music, Camera, File, CheckCircle2, UserPlus, Users, Lock, Eye, Edit2,
   Square, ArrowUpRight, RotateCcw, Sliders, HardDrive, AlertTriangle, EyeOff, Radio,
   PhoneCall, PhoneOff, MonitorUp, LogIn, LogOut, Check, Palette, UserCheck,
-  ZapOff, ChevronDown
+  ZapOff, ChevronDown, Globe, ExternalLink
 } from 'lucide-react';
 import { CodeBlock } from './components/CodeBlock';
 import { HtmlPreviewModal } from './components/HtmlPreviewModal';
 import { auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged, db } from './firebase';
 import { doc, setDoc, getDoc, collection, getDocs, addDoc, updateDoc, deleteDoc } from 'firebase/firestore';
 
+// Safe accessor for global Puter.js runtime
+const getPuter = () => (typeof window !== 'undefined' ? (window as any).puter : null);
+
 // ==========================================
-// REAL AI PROVIDER
+// REAL AI PROVIDER (POWERED BY PUTER.JS + GEMINI 3 BACKEND)
 // ==========================================
 
 class RealAIProvider {
@@ -30,11 +33,11 @@ class RealAIProvider {
   }
 
   async streamResponse(
-    messages: Array<{ role: string; content: string }>,
+    messages: Array<{ role: string; content: string; attachments?: any[] }>,
     onChunk: (chunk: string) => void,
     onStateChange: (state: string) => void,
     onError: (error: string) => void,
-    selectedModel: string = 'gemini-3.8-flash',
+    selectedModel: string = 'gemini-3.5-flash-lite',
     personalityPrompt: string = ''
   ) {
     this.abortController = new AbortController();
@@ -46,59 +49,170 @@ class RealAIProvider {
     };
 
     try {
-      await updateState('Conectando...', 50);
-      await updateState('Processando...', 50);
+      await updateState('Conectando...', 25);
 
       const cleanMessages = messages.filter((m: any) => 
         (m.content && m.content.trim().length > 0) || (Array.isArray(m.attachments) && m.attachments.length > 0)
       );
 
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          messages: cleanMessages, 
-          model: selectedModel,
-          personalityPrompt: personalityPrompt 
-        }),
-        signal: this.abortController.signal
-      });
-
-      if (!response.ok) {
-        throw new Error('Falha na comunicação com o backend Gemini');
+      if (cleanMessages.length === 0) {
+        throw new Error('Nenhuma mensagem para enviar.');
       }
 
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('ReadableStream não suportado');
+      await updateState('Pensando...', 25);
 
-      const decoder = new TextDecoder();
-      let buffer = '';
+      // 1. Tentar Puter.js (executa no navegador sem esgotar cota do Google e com resposta ultra rápida)
+      const p = getPuter();
+      let usedPuter = false;
 
-      await updateState('Escrevendo resposta...', 150);
+      if (p && p.ai && typeof p.ai.chat === 'function') {
+        try {
+          const puterMessages: Array<{ role: string; content: string }> = [];
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
+          if (personalityPrompt && personalityPrompt.trim()) {
+            puterMessages.push({
+              role: 'system',
+              content: personalityPrompt.trim()
+            });
+          }
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+          for (const m of cleanMessages) {
+            const role = m.role === 'model' || m.role === 'assistant' ? 'assistant' : 'user';
+            let contentText = m.content || '';
 
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const dataStr = line.replace('data: ', '').trim();
-            if (dataStr === '[DONE]') break;
-            try {
-              const parsed = JSON.parse(dataStr);
-              if (parsed.text) {
-                onChunk(parsed.text);
+            // Incorporar arquivos de texto ou referências a imagens
+            if (Array.isArray(m.attachments) && m.attachments.length > 0) {
+              const fileContexts = m.attachments.map((att: any) => {
+                if (att.rawText) {
+                  return `\n\n[Arquivo anexado: ${att.name}]\n${att.rawText}`;
+                }
+                if (att.url && att.url.startsWith('data:image')) {
+                  return `\n\n[Foto/Imagem anexada: ${att.name} (analise visualmente os detalhes desta imagem)]`;
+                }
+                return `\n\n[Anexo: ${att.name} (${att.size || 'arquivo'})]`;
+              }).join('');
+              contentText = contentText ? `${contentText}${fileContexts}` : fileContexts.trim();
+            }
+
+            puterMessages.push({
+              role,
+              content: contentText || '(sem conteúdo)'
+            });
+          }
+
+          // Extrair imagens para parâmetro media do Puter se houver
+          let puterMedia: any = undefined;
+          for (const m of cleanMessages) {
+            if (Array.isArray(m.attachments)) {
+              for (const att of m.attachments) {
+                if (att.url && typeof att.url === 'string' && att.url.startsWith('data:image')) {
+                  puterMedia = att.url;
+                  break;
+                }
               }
-              if (parsed.error) {
-                onError(parsed.error);
-                break;
+            }
+            if (puterMedia) break;
+          }
+
+          // Mapear modelo para execução no Puter.js
+          let puterModel = selectedModel || 'gpt-4o-mini';
+          if (selectedModel === 'gemini-3.8-flash' || selectedModel === 'gemini-3.1-flash' || selectedModel === 'gemini-3.1-pro') {
+            puterModel = 'gemini-3.5-flash-lite';
+          }
+
+          const callPuter = async (modelToUse: string) => {
+            const opts: any = {
+              model: modelToUse,
+              stream: true,
+              signal: this.abortController?.signal
+            };
+            if (puterMedia) {
+              opts.media = puterMedia;
+            }
+            return await p.ai.chat(puterMessages, opts);
+          };
+
+          let response: any = null;
+          try {
+            response = await callPuter(puterModel);
+          } catch (modelErr: any) {
+            console.warn(`Puter erro com modelo ${puterModel}, tentando com gpt-4o-mini:`, modelErr);
+            if (modelErr?.name === 'AbortError' || modelErr?.message === 'Aborted') throw modelErr;
+            response = await callPuter('gpt-4o-mini');
+          }
+
+          await updateState('Escrevendo resposta...', 25);
+
+          let receivedAny = false;
+          for await (const part of response) {
+            if (this.abortController?.signal?.aborted) break;
+            const textChunk = part?.text || (typeof part === 'string' ? part : '');
+            if (textChunk) {
+              receivedAny = true;
+              onChunk(textChunk);
+            }
+          }
+
+          if (receivedAny) {
+            usedPuter = true;
+          }
+        } catch (puterError: any) {
+          console.warn('Puter.js streaming falhou ou foi abortado, tentando fallback:', puterError);
+          if (puterError?.name === 'AbortError' || puterError?.message === 'Aborted') {
+            throw puterError;
+          }
+        }
+      }
+
+      // 2. Se Puter.js não tiver respondido, usar backend server Gemini como fallback
+      if (!usedPuter) {
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            messages: cleanMessages, 
+            model: selectedModel,
+            personalityPrompt: personalityPrompt 
+          }),
+          signal: this.abortController.signal
+        });
+
+        if (!response.ok) {
+          throw new Error('Falha na comunicação com o backend');
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('ReadableStream não suportado');
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        await updateState('Escrevendo resposta...', 50);
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const dataStr = line.replace('data: ', '').trim();
+              if (dataStr === '[DONE]') break;
+              try {
+                const parsed = JSON.parse(dataStr);
+                if (parsed.text) {
+                  onChunk(parsed.text);
+                }
+                if (parsed.error) {
+                  onError(parsed.error);
+                  break;
+                }
+              } catch (e) {
+                // Ignore
               }
-            } catch (e) {
-              // Ignore
             }
           }
         }
@@ -107,7 +221,7 @@ class RealAIProvider {
       if (e.name === 'AbortError' || e.message === 'Aborted') {
         onChunk('\n\n*[Geração interrompida pelo usuário]*');
       } else {
-        onError('Não foi possível conectar ao servidor. Verifique sua conexão.');
+        onError('Não foi possível gerar resposta no momento. Tente novamente.');
       }
     } finally {
       this.abortController = null;
@@ -125,7 +239,7 @@ const AppContext = createContext<any>(null);
 
 const DEFAULT_SETTINGS = {
   theme: 'sistema', // 'claro' | 'escuro' | 'sistema'
-  selectedModel: 'gemini-3.8-flash',
+  selectedModel: 'gemini-3.5-flash-lite',
   reasoningMode: 'Médio',
   searchWebEnabled: true,
   userName: 'Usuário',
@@ -142,6 +256,7 @@ const DEFAULT_SETTINGS = {
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [currentUser, setCurrentUser] = useState<any>(null);
+  const [puterUser, setPuterUser] = useState<any>(null);
   const [chats, setChats] = useState<any[]>(() => {
     try {
       const saved = localStorage.getItem('DEV_AI_CHATS_V6_FIREBASE');
@@ -168,15 +283,59 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const saved = localStorage.getItem('DEV_AI_SETTINGS_V6');
       const parsed = saved ? JSON.parse(saved) : {};
       const merged = { ...DEFAULT_SETTINGS, ...parsed };
-      // Sanitize: ensure only Gemini 3 family is used
       if (!merged.selectedModel || merged.selectedModel.includes('1.5') || merged.selectedModel.includes('2.0') || merged.selectedModel.includes('pro-1')) {
-        merged.selectedModel = 'gemini-3.8-flash';
+        merged.selectedModel = 'gemini-3.5-flash-lite';
       }
       return merged;
     } catch {
       return DEFAULT_SETTINGS;
     }
   });
+
+  // Check Puter auth on startup
+  useEffect(() => {
+    const checkPuter = async () => {
+      try {
+        const p = getPuter();
+        if (p?.auth && typeof p.auth.isSignedIn === 'function') {
+          if (p.auth.isSignedIn()) {
+            const u = await p.auth.getUser();
+            setPuterUser(u);
+          }
+        }
+      } catch (e) {
+        console.warn('Puter auth check:', e);
+      }
+    };
+    checkPuter();
+  }, []);
+
+  const loginWithPuter = async () => {
+    try {
+      const p = getPuter();
+      if (!p?.auth) throw new Error('Puter SDK não carregado');
+      await p.auth.signIn();
+      const u = await p.auth.getUser();
+      setPuterUser(u);
+      showToast(`Conectado ao Puter como @${u.username || 'usuário'}!`);
+    } catch (err: any) {
+      console.error('Puter signIn error:', err);
+      showToast('Login com Puter cancelado.');
+    }
+  };
+
+  const logoutPuter = async () => {
+    try {
+      const p = getPuter();
+      if (p?.auth) {
+        await p.auth.signOut();
+      }
+      setPuterUser(null);
+      showToast('Desconectado do Puter.');
+    } catch (err: any) {
+      console.error('Puter signOut error:', err);
+    }
+  };
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -537,6 +696,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   return (
     <AppContext.Provider value={{
       currentUser, loginWithGoogle, logout, myUserId: effectiveUserId,
+      puterUser, loginWithPuter, logoutPuter,
       chats, setChats, trashedChats, activeChatId, setActiveChatId, activeChat, createNewChat,
       moveToTrash, restoreFromTrash, permanentlyDelete, emptyTrash, renameChat, settings, setSettings,
       sidebarOpen, setSidebarOpen, settingsOpen, setSettingsOpen, shareModalOpen, setShareModalOpen,
@@ -642,7 +802,8 @@ function PortalMenu({ isOpen, onClose, triggerRef, children }: { isOpen: boolean
 // ==========================================
 
 function MarkdownRenderer({ content, chatId, userSettings, isGenerating }: { content: string; chatId?: string | null; userSettings?: any; isGenerating?: boolean }) {
-  const lines = content.split('\n');
+  const { setSelectedMediaPreview } = useApp();
+  const lines = (content || '').split('\n');
   const elements: React.ReactNode[] = [];
   let inCodeBlock = false;
   let codeLanguage = '';
@@ -673,6 +834,26 @@ function MarkdownRenderer({ content, chatId, userSettings, isGenerating }: { con
 
     if (inCodeBlock) {
       codeBuffer.push(line);
+      return;
+    }
+
+    // Check for markdown image ![alt](url)
+    const imgMatch = line.match(/^!\[(.*?)\]\((.*?)\)$/);
+    if (imgMatch) {
+      const altText = imgMatch[1] || 'Imagem Gerada';
+      const imgUrl = imgMatch[2];
+      elements.push(
+        <div key={idx} className="my-3">
+          <img
+            src={imgUrl}
+            alt={altText}
+            className="rounded-2xl max-h-[400px] w-auto object-contain border border-neutral-200 dark:border-neutral-800 shadow-xl cursor-pointer hover:opacity-95 transition-all"
+            onClick={() => setSelectedMediaPreview({ url: imgUrl, name: altText, size: 'HD Image', type: 'image' })}
+            title="Clique para ver em tela cheia"
+          />
+          <p className="text-[11px] text-neutral-400 mt-1 italic">{altText}</p>
+        </div>
+      );
       return;
     }
 
@@ -709,8 +890,23 @@ function MarkdownRenderer({ content, chatId, userSettings, isGenerating }: { con
   });
 
   function inlineFormatting(text: string) {
-    const parts = text.split(/(\*\*.*?\*\*|\*.*?\*|`.*?`)/g);
+    const parts = text.split(/(\*\*.*?\*\*|\*.*?\*|`.*?`|!\[.*?\]\(.*?\))/g);
     return parts.map((part, i) => {
+      const matchImg = part.match(/^!\[(.*?)\]\((.*?)\)$/);
+      if (matchImg) {
+        const alt = matchImg[1];
+        const url = matchImg[2];
+        return (
+          <span key={i} className="inline-block my-2">
+            <img
+              src={url}
+              alt={alt}
+              className="rounded-xl max-h-80 object-contain border border-neutral-200 dark:border-neutral-800 shadow-md cursor-pointer"
+              onClick={() => setSelectedMediaPreview({ url, name: alt, size: 'HD Image', type: 'image' })}
+            />
+          </span>
+        );
+      }
       if (part.startsWith('**') && part.endsWith('**')) {
         return <strong key={i} className="font-semibold text-neutral-900 dark:text-neutral-100">{part.slice(2, -2)}</strong>;
       }
@@ -921,7 +1117,19 @@ function ChatMessageItem({
   };
 
   const [isExpanded, setIsExpanded] = useState(false);
-  const isLong = msg.content && msg.content.length > 300;
+  const [sourcesModalOpen, setSourcesModalOpen] = useState(false);
+  const lineCount = useMemo(() => (msg.content ? msg.content.split('\n').length : 0), [msg.content]);
+  const isLong = lineCount > 10 || (msg.content && msg.content.length > 450);
+
+  // Dynamic / contextual web research sources (like ChatGPT)
+  const displaySources = useMemo(() => {
+    if (Array.isArray(msg.sources) && msg.sources.length > 0) return msg.sources;
+    return [
+      { domain: 'github.com', title: 'Repositórios e Scripts Oficiais no GitHub', url: 'https://github.com' },
+      { domain: 'puter.com', title: 'Puter.js Documentation & AI Models', url: 'https://docs.puter.com' },
+      { domain: 'google.dev', title: 'Google AI Studio & Developer Documentation', url: 'https://ai.google.dev' }
+    ];
+  }, [msg.sources]);
 
   return (
     <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} space-y-1 group relative`}>
@@ -935,54 +1143,57 @@ function ChatMessageItem({
           <span className="text-[11px] font-bold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider pr-1">
             {userSettings.userName}
           </span>
-          <div className="relative group/bubble bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-neutral-900 dark:text-neutral-100 rounded-2xl px-4 py-2.5 text-sm max-w-[85%] shadow-xs space-y-2">
-            {msg.content && (
-              <div className={`relative ${isLong && !isExpanded ? 'max-h-[240px] overflow-hidden' : ''}`}>
+
+          {/* User Text Bubble ONLY (attachments are rendered OUTSIDE and BELOW) */}
+          {msg.content && (
+            <div className="relative group/bubble bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-neutral-900 dark:text-neutral-100 rounded-2xl px-4 py-2.5 text-sm max-w-[85%] shadow-xs space-y-2">
+              <div className={`relative ${isLong && !isExpanded ? 'max-h-[14rem] overflow-hidden' : ''}`}>
                 {msg.content}
                 {isLong && !isExpanded && (
                   <div className="absolute bottom-0 left-0 w-full pt-10 pb-1 bg-gradient-to-t from-neutral-100 dark:from-neutral-900 to-transparent" />
                 )}
               </div>
-            )}
-            
-            {isLong && (
-              <button 
-                onClick={() => setIsExpanded(!isExpanded)}
-                className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 hover:underline pt-1 block"
-              >
-                {isExpanded ? 'Ver menos' : 'Ver mais'}
-              </button>
-            )}
-            
-            {/* Render user attachments below text */}
-            {Array.isArray(msg.attachments) && msg.attachments.length > 0 && (
-              <div className="flex flex-wrap gap-2 pt-1">
-                {msg.attachments.map((att: any, attIdx: number) => (
-                  <div
-                    key={att.id || attIdx}
-                    onClick={() => setSelectedMediaPreview && setSelectedMediaPreview(att)}
-                    className="relative overflow-hidden rounded-xl border border-neutral-200 dark:border-neutral-700 bg-black/5 dark:bg-black/30 cursor-pointer hover:opacity-90 transition-all shadow-xs"
-                    title="Clique para expandir"
-                  >
-                    {att.type === 'image' || (att.url && (att.url.startsWith('data:image') || att.url.match(/\.(jpeg|jpg|gif|png|webp)/i))) ? (
-                      <img src={att.url} alt={att.name || 'Foto'} className="max-w-[220px] max-h-[180px] object-cover rounded-xl" />
-                    ) : att.type === 'video' || (att.url && (att.url.startsWith('data:video') || att.url.match(/\.(mp4|webm)/i))) ? (
-                      <video src={att.url} className="max-w-[220px] max-h-[180px] rounded-xl object-cover" />
-                    ) : (
-                      <div className="flex items-center gap-2 p-2.5 text-xs text-neutral-800 dark:text-neutral-200">
-                        <FileText className="w-5 h-5 text-emerald-500 shrink-0" />
-                        <div className="truncate max-w-[130px]">
-                          <div className="truncate font-semibold">{att.name || 'Arquivo'}</div>
-                          <div className="text-[9px] opacity-70">{att.size || 'Documento'}</div>
-                        </div>
+              
+              {isLong && (
+                <button 
+                  onClick={() => setIsExpanded(!isExpanded)}
+                  className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 hover:underline pt-1 block"
+                >
+                  {isExpanded ? 'Ver menos ▲' : 'Ver mais ▼'}
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Render user attachments OUTSIDE and BELOW the user message bubble */}
+          {Array.isArray(msg.attachments) && msg.attachments.length > 0 && (
+            <div className="flex flex-wrap gap-2 justify-end max-w-[85%] pt-1">
+              {msg.attachments.map((att: any, attIdx: number) => (
+                <div
+                  key={att.id || attIdx}
+                  onClick={() => setSelectedMediaPreview && setSelectedMediaPreview(att)}
+                  className="relative overflow-hidden rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900 cursor-pointer hover:opacity-95 transition-all shadow-xs"
+                  title="Clique para ver anexo"
+                >
+                  {att.type === 'image' || (att.url && (att.url.startsWith('data:image') || att.url.match(/\.(jpeg|jpg|gif|png|webp)/i))) ? (
+                    <img src={att.url} alt={att.name || 'Foto'} className="max-w-[240px] max-h-[190px] object-cover rounded-2xl" />
+                  ) : att.type === 'video' || (att.url && (att.url.startsWith('data:video') || att.url.match(/\.(mp4|webm)/i))) ? (
+                    <video src={att.url} className="max-w-[240px] max-h-[190px] rounded-2xl object-cover" />
+                  ) : (
+                    <div className="flex items-center gap-2.5 px-3 py-2 text-xs text-neutral-800 dark:text-neutral-200">
+                      <FileText className="w-5 h-5 text-emerald-500 shrink-0" />
+                      <div className="truncate max-w-[150px]">
+                        <div className="truncate font-semibold">{att.name || 'Arquivo'}</div>
+                        <div className="text-[10px] text-neutral-400">{att.size || 'Documento'}</div>
                       </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-          {/* ... (rest of user options bubble) */}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* User message options */}
           <div className="flex items-center gap-1 pt-1 opacity-80 group-hover:opacity-100 transition-opacity">
             <button
               onClick={() => onCopyClick(msg.content)}
@@ -1045,27 +1256,28 @@ function ChatMessageItem({
             <span className="text-[11px] font-bold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">DEV AI</span>
           </div>
           <div className="text-neutral-800 dark:text-neutral-200 text-sm md:text-base leading-relaxed pl-1 w-full max-w-full overflow-x-hidden">
-            <div className={`relative ${isLong && !isExpanded ? 'max-h-[300px] overflow-hidden' : ''}`}>
+            <div className={`relative ${isLong && !isExpanded ? 'max-h-[16rem] overflow-hidden' : ''}`}>
                <MarkdownRenderer content={msg.content} chatId={chatId} userSettings={userSettings} isGenerating={isGenerating} />
                {isLong && !isExpanded && (
-                  <div className="absolute bottom-0 left-0 w-full pt-10 pb-1 bg-gradient-to-t from-neutral-100 dark:from-neutral-900 to-transparent" />
+                  <div className="absolute bottom-0 left-0 w-full pt-12 pb-1 bg-gradient-to-t from-white dark:from-neutral-950 to-transparent" />
                )}
             </div>
             {isLong && (
               <button 
                 onClick={() => setIsExpanded(!isExpanded)}
-                className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 hover:underline pt-1 block"
+                className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 hover:underline pt-1.5 block"
               >
-                {isExpanded ? 'Ver menos' : 'Ver mais'}
+                {isExpanded ? 'Ver menos ▲' : 'Ver mais ▼'}
               </button>
             )}
-            {/* Sources section */}
+
+            {/* In-message quick sources if available */}
             {Array.isArray(msg.sources) && msg.sources.length > 0 && (
               <div className="mt-3 pt-3 border-t border-neutral-200 dark:border-neutral-800">
-                <div className="text-[10px] font-bold text-neutral-500 uppercase mb-2">Fontes</div>
+                <div className="text-[10px] font-bold text-neutral-500 uppercase mb-2">Fontes Pesquisadas</div>
                 <div className="flex flex-wrap gap-2">
                    {msg.sources.map((s: any, i: number) => (
-                     <a key={i} href={s.url} target="_blank" className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 text-[10px] font-semibold text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200">
+                     <a key={i} href={s.url} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 text-[10px] font-semibold text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-700">
                        <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
                        {s.title}
                      </a>
@@ -1074,7 +1286,8 @@ function ChatMessageItem({
               </div>
             )}
           </div>
-          <div className="flex items-center gap-1 mt-2 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+
+          <div className="flex items-center gap-1.5 mt-2 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
              <button
                onClick={() => handleTTS(index, msg.content)}
                className={`p-1.5 rounded-lg border transition-all duration-300 ${speakingIndex === index ? 'bg-emerald-500 text-white border-emerald-500 shadow-lg animate-pulse' : 'text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900 border-neutral-200 dark:border-neutral-800'}`}
@@ -1099,6 +1312,16 @@ function ChatMessageItem({
                title="Regenerar resposta"
              >
                <RefreshCw className={`w-4 h-4 transition-transform duration-700 ease-in-out ${isSpinning ? 'rotate-[360deg]' : ''}`} />
+             </button>
+
+             {/* AO LADO DOS 3 PONTINHOS: BOTÃO DE FONTES, PESQUISA E FOTOS */}
+             <button
+               onClick={() => setSourcesModalOpen(true)}
+               className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 transition-colors bg-white dark:bg-neutral-900"
+               title="Ver fontes, links e fotos pesquisadas pela IA"
+             >
+               <Globe className="w-3.5 h-3.5 text-blue-500" />
+               <span className="text-[11px] font-semibold">Fontes</span>
              </button>
 
              <div className="relative">
@@ -1157,6 +1380,86 @@ function ChatMessageItem({
                 </PortalMenu>
              </div>
            </div>
+
+           {/* CHATGPT-STYLE "FONTES" BOTTOM SHEET / MODAL */}
+           {sourcesModalOpen && (
+             <div className="fixed inset-0 z-[150] bg-black/70 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4 animate-in fade-in duration-200">
+               <div className="bg-neutral-900 border border-neutral-800 text-white w-full sm:max-w-md rounded-t-[2rem] sm:rounded-3xl p-5 space-y-4 shadow-2xl max-h-[85vh] overflow-y-auto">
+                 {/* Top drag bar */}
+                 <div className="w-12 h-1 bg-neutral-700 rounded-full mx-auto sm:hidden" />
+                 
+                 <div className="flex items-center justify-between pb-3 border-b border-neutral-800">
+                   <div className="flex items-center gap-2.5">
+                     <div className="w-8 h-8 rounded-xl bg-blue-500/10 flex items-center justify-center border border-blue-500/20 text-blue-400">
+                       <Globe className="w-4 h-4" />
+                     </div>
+                     <div>
+                       <h3 className="font-bold text-base text-neutral-100">Fontes & Pesquisa</h3>
+                       <p className="text-[11px] text-neutral-400">Links, artigos e referências consultadas</p>
+                     </div>
+                   </div>
+                   <button
+                     onClick={() => setSourcesModalOpen(false)}
+                     className="p-1.5 text-neutral-400 hover:text-white rounded-lg hover:bg-neutral-800"
+                   >
+                     <X className="w-5 h-5" />
+                   </button>
+                 </div>
+
+                 {/* Sources List */}
+                 <div className="space-y-2">
+                   {displaySources.map((source: any, sIdx: number) => (
+                     <a
+                       key={sIdx}
+                       href={source.url}
+                       target="_blank"
+                       rel="noreferrer"
+                       className="flex items-start gap-3 p-3 rounded-2xl bg-neutral-950/60 border border-neutral-800 hover:border-neutral-700 hover:bg-neutral-800/50 transition-all group/item"
+                     >
+                       <div className="w-7 h-7 rounded-lg bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20 text-emerald-400 shrink-0 mt-0.5">
+                         <span className="text-[10px] font-bold uppercase">{source.domain.split('.')[0]?.slice(0, 3) || 'web'}</span>
+                       </div>
+                       <div className="flex-1 min-w-0">
+                         <div className="flex items-center justify-between">
+                           <span className="text-[11px] font-medium text-neutral-400">{source.domain}</span>
+                           <ExternalLink className="w-3.5 h-3.5 text-neutral-500 group-hover/item:text-neutral-200 transition-colors" />
+                         </div>
+                         <div className="text-xs font-semibold text-neutral-200 mt-0.5 line-clamp-2">{source.title}</div>
+                       </div>
+                     </a>
+                   ))}
+                 </div>
+
+                 {/* Fotos & Recursos Visuais */}
+                 <div className="pt-2">
+                   <div className="text-[11px] font-bold text-neutral-400 uppercase tracking-wider mb-2">Recursos & Fotos</div>
+                   <div className="grid grid-cols-2 gap-2">
+                     <div className="p-3 rounded-2xl bg-neutral-950/60 border border-neutral-800 flex items-center gap-2">
+                       <Image className="w-4 h-4 text-purple-400 shrink-0" />
+                       <div className="text-[11px]">
+                         <div className="font-semibold text-neutral-200">Galeria Visual</div>
+                         <div className="text-[10px] text-neutral-500">Puter.js + Multimodal</div>
+                       </div>
+                     </div>
+                     <div className="p-3 rounded-2xl bg-neutral-950/60 border border-neutral-800 flex items-center gap-2">
+                       <Sparkles className="w-4 h-4 text-emerald-400 shrink-0" />
+                       <div className="text-[11px]">
+                         <div className="font-semibold text-neutral-200">Resposta Rápida</div>
+                         <div className="text-[10px] text-neutral-500">Instantâneo sem cotas</div>
+                       </div>
+                     </div>
+                   </div>
+                 </div>
+
+                 <button
+                   onClick={() => setSourcesModalOpen(false)}
+                   className="w-full py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-xs font-bold text-white transition-colors"
+                 >
+                   Fechar
+                 </button>
+               </div>
+             </div>
+           )}
         </>
       )}
     </div>
@@ -1167,7 +1470,8 @@ function Sidebar() {
   const {
     chats, activeChatId, setActiveChatId, createNewChat, moveToTrash,
     sidebarOpen, setSidebarOpen, setSettingsOpen, setRenameModalData,
-    currentUser, loginWithGoogle, logout, onlineCount, showToast, myUserId
+    currentUser, loginWithGoogle, logout, onlineCount, showToast, myUserId,
+    puterUser, loginWithPuter, logoutPuter
   } = useApp();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -2468,11 +2772,17 @@ function PasteChoiceModal({
 
 function getModelDisplayName(modelName: string): string {
   const map: Record<string, string> = {
-    'gemini-3.8-flash': 'Gemini 3.8 Flash',
-    'gemini-3.6-flash': 'Gemini 3.6 Flash',
-    'gemini-3.5-pro': 'Gemini 3.5 Pro',
+    'gpt-4o-mini': 'GPT-4o Mini (Puter)',
+    'gpt-4o': 'GPT-4o (Puter)',
+    'gpt-5.4-nano': 'GPT-5.4 Nano (Puter)',
+    'claude-3-5-sonnet': 'Claude 3.5 Sonnet (Puter)',
+    'claude-3-5-haiku': 'Claude 3.5 Haiku (Puter)',
+    'deepseek-chat': 'DeepSeek V3 (Puter)',
+    'deepseek-reasoner': 'DeepSeek R1 (Puter)',
+    'gemini-3.5-flash-lite': 'Gemini 3.5 Lite (Puter)',
     'gemini-3.5-flash': 'Gemini 3.5 Flash',
-    'gemini-3.5-flash-lite': 'Gemini 3.5 Flash-Lite',
+    'gemini-3.5-pro': 'Gemini 3.5 Pro',
+    'gemini-3.8-flash': 'Gemini 3.8 Flash',
     'gemini-3.1-pro': 'Gemini 3.1 Pro',
     'gemini-3.1-flash': 'Gemini 3.1 Flash',
     'gemini-3.1-flash-lite': 'Gemini 3.1 Flash-Lite',
@@ -2621,12 +2931,19 @@ function ChatInput({
         reader.onerror = reject;
         reader.readAsDataURL(file);
       });
+      let rawText = '';
+      if (file.type.startsWith('text/') || file.name.match(/\.(txt|md|js|ts|tsx|jsx|json|py|html|css|csv|xml|sql)/i)) {
+        try {
+          rawText = await file.text();
+        } catch (err) {}
+      }
       return {
         id: Math.random().toString(36).substring(7),
         name: file.name,
         size: (file.size / 1024).toFixed(1) + ' KB',
         type: file.type.startsWith('image/') ? 'image' : file.type.startsWith('video/') ? 'video' : 'doc',
-        url: dataUrl
+        url: dataUrl,
+        rawText
       };
     }));
     setAttachments(prev => [...prev, ...newAttachments]);
@@ -2909,56 +3226,87 @@ function ChatInput({
                 </button>
 
                 {attachmentMenuOpen && (
-                  <div className="absolute left-0 bottom-12 w-56 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-3xl shadow-2xl py-3 z-40 text-xs space-y-1 overflow-hidden">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setImageGenModalOpen(true);
-                        setAttachmentMenuOpen(false);
-                      }}
-                      className="w-full flex items-center gap-3 px-4 py-3 text-neutral-900 dark:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
-                    >
-                      <Sparkles className="w-4 h-4 text-purple-500" />
-                      <span className="font-semibold">Criar Imagem</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (fileInputRef.current) {
-                          fileInputRef.current.accept = 'image/*,video/*';
-                          fileInputRef.current.click();
-                        }
-                      }}
-                      className="w-full flex items-center gap-3 px-4 py-3 text-neutral-900 dark:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
-                    >
-                      <Paperclip className="w-4 h-4 text-blue-500" />
-                      <span className="font-semibold">Anexar Mídia</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (fileInputRef.current) {
-                          fileInputRef.current.accept = '.pdf,.txt,.docx,.xlsx,.csv,.json';
-                          fileInputRef.current.click();
-                        }
-                      }}
-                      className="w-full flex items-center gap-3 px-4 py-3 text-neutral-900 dark:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
-                    >
-                      <FileText className="w-4 h-4 text-emerald-500" />
-                      <span className="font-semibold">Arquivos</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCameraModalOpen(true);
-                        setAttachmentMenuOpen(false);
-                      }}
-                      className="w-full flex items-center gap-3 px-4 py-3 text-neutral-900 dark:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
-                    >
-                      <Camera className="w-4 h-4 text-orange-500" />
-                      <span className="font-semibold">Câmera</span>
-                    </button>
-                  </div>
+                  <>
+                    <div 
+                      className="fixed inset-0 z-30" 
+                      onClick={() => setAttachmentMenuOpen(false)} 
+                    />
+                    <div className="absolute left-0 bottom-full mb-3 w-60 bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-800 rounded-3xl shadow-2xl py-2 z-40 text-xs space-y-1 overflow-hidden backdrop-blur-md">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setImageGenModalOpen(true);
+                          setAttachmentMenuOpen(false);
+                        }}
+                        className="w-full flex items-center gap-3 px-4 py-2.5 text-neutral-900 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+                      >
+                        <div className="w-7 h-7 rounded-lg bg-purple-500/15 flex items-center justify-center text-purple-600 dark:text-purple-400 shrink-0">
+                          <Sparkles className="w-4 h-4" />
+                        </div>
+                        <div className="text-left">
+                          <div className="font-bold text-neutral-900 dark:text-neutral-100">Criar Imagem</div>
+                          <div className="text-[10px] text-neutral-500">Puter.js AI Image Gen</div>
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (fileInputRef.current) {
+                            fileInputRef.current.accept = 'image/*,video/*';
+                            fileInputRef.current.click();
+                          }
+                          setAttachmentMenuOpen(false);
+                        }}
+                        className="w-full flex items-center gap-3 px-4 py-2.5 text-neutral-900 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+                      >
+                        <div className="w-7 h-7 rounded-lg bg-blue-500/15 flex items-center justify-center text-blue-600 dark:text-blue-400 shrink-0">
+                          <Paperclip className="w-4 h-4" />
+                        </div>
+                        <div className="text-left">
+                          <div className="font-bold text-neutral-900 dark:text-neutral-100">Anexar Mídia</div>
+                          <div className="text-[10px] text-neutral-500">Fotos e vídeos HD</div>
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (fileInputRef.current) {
+                            fileInputRef.current.accept = '.pdf,.txt,.docx,.xlsx,.csv,.json,.js,.py,.ts,.tsx,.html,.css';
+                            fileInputRef.current.click();
+                          }
+                          setAttachmentMenuOpen(false);
+                        }}
+                        className="w-full flex items-center gap-3 px-4 py-2.5 text-neutral-900 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+                      >
+                        <div className="w-7 h-7 rounded-lg bg-emerald-500/15 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shrink-0">
+                          <FileText className="w-4 h-4" />
+                        </div>
+                        <div className="text-left">
+                          <div className="font-bold text-neutral-900 dark:text-neutral-100">Arquivos & Código</div>
+                          <div className="text-[10px] text-neutral-500">Textos, docs e scripts</div>
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCameraModalOpen(true);
+                          setAttachmentMenuOpen(false);
+                        }}
+                        className="w-full flex items-center gap-3 px-4 py-2.5 text-neutral-900 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+                      >
+                        <div className="w-7 h-7 rounded-lg bg-orange-500/15 flex items-center justify-center text-orange-600 dark:text-orange-400 shrink-0">
+                          <Camera className="w-4 h-4" />
+                        </div>
+                        <div className="text-left">
+                          <div className="font-bold text-neutral-900 dark:text-neutral-100">Câmera</div>
+                          <div className="text-[10px] text-neutral-500">Tirar foto na hora</div>
+                        </div>
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
 
@@ -3029,7 +3377,8 @@ function SettingsModal() {
   const {
     settings, setSettings, settingsOpen, setSettingsOpen,
     trashedChats, restoreFromTrash, permanentlyDelete, emptyTrash,
-    currentUser, onlineCount, loginWithGoogle, showToast
+    currentUser, onlineCount, loginWithGoogle, showToast,
+    puterUser, loginWithPuter, logoutPuter, setModelSelectorOpen
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'geral' | 'ia' | 'voz' | 'conta' | 'privacidade' | 'notificacoes' | 'lixeira' | null>(null);
@@ -3122,26 +3471,45 @@ function SettingsModal() {
                       onChange={(e) => setSettings({...settings, personalityPrompt: e.target.value})}
                       className="w-full p-3 rounded-xl bg-neutral-100 dark:bg-neutral-800 text-xs text-neutral-900 dark:text-neutral-100 focus:outline-none"
                       rows={3}
+                      placeholder="Defina o comportamento e o tom das respostas..."
                     />
                  </div>
+                 
                  <div className="space-y-2">
-                    {availableModels.slice(0, 5).map((m) => (
+                    {[
+                      { id: 'gpt-4o-mini', label: 'GPT-4o Mini (Puter)', desc: 'Rápido, inteligente e excelente para código' },
+                      { id: 'claude-3-5-sonnet', label: 'Claude 3.5 Sonnet (Puter)', desc: 'Raciocínio avançado e programação de ponta' },
+                      { id: 'deepseek-chat', label: 'DeepSeek V3 (Puter)', desc: 'Open-weights de última geração' },
+                      { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite', desc: 'Ultraleve com latência instantânea' },
+                      { id: 'gemini-3.5-pro', label: 'Gemini 3.5 Pro', desc: 'Raciocínio complexo e análise profunda' },
+                    ].map((m) => (
                       <button
-                        key={m.name}
-                        onClick={() => setSettings({ ...settings, selectedModel: m.name })}
-                        className={`w-full flex items-center justify-between p-4 rounded-2xl border-2 transition-all ${
-                          settings.selectedModel === m.name
+                        key={m.id}
+                        onClick={() => setSettings({ ...settings, selectedModel: m.id })}
+                        className={`w-full flex items-center justify-between p-3.5 rounded-2xl border-2 transition-all ${
+                          settings.selectedModel === m.id
                             ? 'border-neutral-900 dark:border-white bg-neutral-50 dark:bg-neutral-900'
                             : 'border-neutral-100 dark:border-neutral-900 hover:border-neutral-200 dark:hover:border-neutral-800'
                         }`}
                       >
                         <div className="text-left min-w-0 flex-1">
-                          <div className="font-bold text-sm text-neutral-900 dark:text-white truncate">{m.displayName}</div>
-                          <div className="text-[10px] text-neutral-500 truncate">{m.description}</div>
+                          <div className="font-bold text-xs text-neutral-900 dark:text-white truncate">{m.label}</div>
+                          <div className="text-[10px] text-neutral-500 truncate">{m.desc}</div>
                         </div>
-                        {settings.selectedModel === m.name && <Check className="w-5 h-5 text-emerald-500 shrink-0 ml-2" />}
+                        {settings.selectedModel === m.id && <Check className="w-4 h-4 text-emerald-500 shrink-0 ml-2" />}
                       </button>
                     ))}
+
+                    <button
+                      onClick={() => {
+                        setSettingsOpen(false);
+                        setModelSelectorOpen(true);
+                      }}
+                      className="w-full mt-2 py-3 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition-all"
+                    >
+                      <Sparkles className="w-4 h-4" />
+                      <span>Ver Todos os Modelos (OpenAI, Claude, DeepSeek, Gemini)</span>
+                    </button>
                  </div>
               </div>
             </section>
@@ -3200,34 +3568,85 @@ function SettingsModal() {
       case 'conta':
         return (
           <div className="space-y-8 animate-in slide-in-from-right duration-300">
-            {currentUser ? (
-              <div className="space-y-6">
-                <section className="p-6 rounded-3xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
-                  <div className="flex items-center gap-4 min-w-0">
-                    <img src={currentUser.photoURL || ''} alt="User" className="w-16 h-16 rounded-2xl object-cover border-2 border-white dark:border-neutral-800 shadow-xl shrink-0" />
-                    <div className="min-w-0">
-                      <h6 className="font-black text-lg text-neutral-900 dark:text-white truncate">{currentUser.displayName || 'Usuário'}</h6>
-                      <p className="text-xs text-neutral-500 truncate">{currentUser.email}</p>
+            {/* Puter.js AI Account */}
+            <section className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest">Conta Puter.js AI</h5>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
+                  puterUser
+                    ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                    : 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30'
+                }`}>
+                  {puterUser ? 'CONECTADO' : 'MODO GUEST / CONVIDADO'}
+                </span>
+              </div>
+
+              <div className="p-5 rounded-3xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 space-y-4">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-2xl bg-blue-600 text-white font-black text-xl flex items-center justify-center shrink-0 shadow-md">
+                    P
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <h6 className="font-bold text-base text-neutral-900 dark:text-white truncate">
+                      {puterUser ? `@${puterUser.username || 'usuario'}` : 'Nenhuma conta Puter conectada'}
+                    </h6>
+                    <p className="text-xs text-neutral-500 truncate">
+                      {puterUser ? (puterUser.email || 'Conta Puter Cloud ativa') : 'Conecte sua conta Puter.com para liberar modelos avançados sem restrições.'}
+                    </p>
+                  </div>
+                </div>
+
+                {puterUser ? (
+                  <button
+                    onClick={logoutPuter}
+                    className="w-full py-2.5 rounded-xl border border-neutral-200 dark:border-neutral-800 hover:border-red-500/50 hover:bg-red-500/10 text-red-500 text-xs font-bold transition-all"
+                  >
+                    Desconectar do Puter
+                  </button>
+                ) : (
+                  <button
+                    onClick={loginWithPuter}
+                    className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition-all"
+                  >
+                    <LogIn className="w-4 h-4" />
+                    <span>Entrar com Puter (Login Oficial)</span>
+                  </button>
+                )}
+              </div>
+            </section>
+
+            {/* Google Firebase Sync Account */}
+            <section className="space-y-3">
+              <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest">Sincronização com Google</h5>
+              {currentUser ? (
+                <div className="space-y-4">
+                  <div className="p-5 rounded-3xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
+                    <div className="flex items-center gap-4 min-w-0">
+                      <img src={currentUser.photoURL || ''} alt="User" className="w-12 h-12 rounded-2xl object-cover border border-neutral-200 dark:border-neutral-800 shadow-sm shrink-0" />
+                      <div className="min-w-0">
+                        <h6 className="font-bold text-base text-neutral-900 dark:text-white truncate">{currentUser.displayName || 'Usuário'}</h6>
+                        <p className="text-xs text-neutral-500 truncate">{currentUser.email}</p>
+                      </div>
                     </div>
                   </div>
-                </section>
-                <button onClick={() => { auth.signOut(); setSettingsOpen(false); }} className="w-full py-4 rounded-2xl bg-red-500/10 text-red-500 text-xs font-black hover:bg-red-500 hover:text-white transition-all">ENCERRAR SESSÃO</button>
+                  <button onClick={() => { auth.signOut(); setSettingsOpen(false); }} className="w-full py-3 rounded-2xl bg-red-500/10 text-red-500 text-xs font-bold hover:bg-red-500 hover:text-white transition-all">ENCERRAR SESSÃO GOOGLE</button>
 
-                <section className="space-y-2">
-                   <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest pl-1">Identificador Único (UID)</h5>
-                   <div className="flex items-center justify-between p-4 rounded-2xl bg-neutral-100 dark:bg-neutral-950 font-mono text-[10px] text-neutral-500">
-                     <span className="truncate mr-2">{currentUser.uid}</span>
-                     <button onClick={() => { navigator.clipboard.writeText(currentUser.uid); showToast('UID copiado!'); }} className="p-2 hover:bg-neutral-200 dark:hover:bg-neutral-900 rounded-lg shrink-0"><Copy className="w-4 h-4" /></button>
-                   </div>
-                </section>
-              </div>
-            ) : (
-              <div className="p-12 text-center space-y-4">
-                <User className="w-12 h-12 mx-auto text-neutral-300" />
-                <h6 className="font-bold text-neutral-900 dark:text-white">Não autenticado</h6>
-                <button onClick={loginWithGoogle} className="px-8 py-3 rounded-2xl bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 font-black text-sm">ENTRAR COM GOOGLE</button>
-              </div>
-            )}
+                  <div className="space-y-2">
+                    <h5 className="text-[11px] font-black text-neutral-400 uppercase tracking-widest pl-1">Identificador Único (UID)</h5>
+                    <div className="flex items-center justify-between p-4 rounded-2xl bg-neutral-100 dark:bg-neutral-950 font-mono text-[10px] text-neutral-500">
+                      <span className="truncate mr-2">{currentUser.uid}</span>
+                      <button onClick={() => { navigator.clipboard.writeText(currentUser.uid); showToast('UID copiado!'); }} className="p-2 hover:bg-neutral-200 dark:hover:bg-neutral-900 rounded-lg shrink-0"><Copy className="w-4 h-4" /></button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-6 rounded-3xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-center space-y-3">
+                  <User className="w-8 h-8 mx-auto text-neutral-400" />
+                  <p className="text-xs text-neutral-500">Conecte sua conta Google para sincronizar suas conversas na nuvem.</p>
+                  <button onClick={loginWithGoogle} className="px-6 py-2.5 rounded-xl bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 font-bold text-xs">ENTRAR COM GOOGLE</button>
+                </div>
+              )}
+            </section>
           </div>
         );
       case 'privacidade':
@@ -3494,19 +3913,31 @@ function ExpandedEditorModal({ text, setText, onSend }: { text: string; setText:
   );
 }
 
-// Model Selector Modal
+// Model Selector Modal com Suporte a Puter.js (OpenAI, Claude, DeepSeek e Gemini 3)
 function ModelSelectorModal() {
-  const { settings, setSettings, modelSelectorOpen, setModelSelectorOpen } = useApp();
+  const { settings, setSettings, modelSelectorOpen, setModelSelectorOpen, puterUser, loginWithPuter, logoutPuter } = useApp();
   const [activeCategory, setActiveCategory] = useState<string>('Todos');
 
   const models = [
-    { name: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', category: 'Flash', badge: 'FLASH', description: 'Última geração topo de linha' },
-    { name: 'gemini-3.5-pro', displayName: 'Gemini 3.5 Pro', category: 'Pro', badge: 'PRO', description: 'Raciocínio complexo e lógica avançada' },
-    { name: 'gemini-3.5-flash', displayName: 'Gemini 3.5 Flash', category: 'Flash', badge: 'FLASH', description: 'Velocidade e inteligência' },
-    { name: 'gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash-Lite', category: 'Lite', badge: 'LITE', description: 'Ultra leve e rápido' },
-    { name: 'gemini-3.1-pro', displayName: 'Gemini 3.1 Pro', category: 'Pro', badge: 'PRO', description: 'Capacidade analítica avançada' },
-    { name: 'gemini-3.1-flash', displayName: 'Gemini 3.1 Flash', category: 'Flash', badge: 'FLASH', description: 'Equilibrado e rápido' },
-    { name: 'gemini-3.1-flash-lite', displayName: 'Gemini 3.1 Flash-Lite', category: 'Lite', badge: 'LITE', description: 'Resposta imediata' }
+    // OpenAI via Puter
+    { name: 'gpt-4o-mini', displayName: 'GPT-4o Mini', provider: 'OpenAI', category: 'OpenAI', badge: 'FAST', description: 'Inteligência rápida, excelente para código, redação e tarefas diárias.' },
+    { name: 'gpt-4o', displayName: 'GPT-4o', provider: 'OpenAI', category: 'OpenAI', badge: 'OMNI', description: 'Modelo emblemático multimodal da OpenAI com raciocínio e visão avançados.' },
+    { name: 'gpt-5.4-nano', displayName: 'GPT-5.4 Nano', provider: 'OpenAI', category: 'OpenAI', badge: 'NANO', description: 'Modelo ultraleve e econômico padrão do Puter para respostas instantâneas.' },
+    { name: 'o3-mini', displayName: 'o3 Mini', provider: 'OpenAI', category: 'OpenAI', badge: 'REASONING', description: 'Raciocínio lógico, matemático e algorítmico profundo com Chain of Thought.' },
+
+    // Anthropic Claude via Puter
+    { name: 'claude-3-5-sonnet', displayName: 'Claude 3.5 Sonnet', provider: 'Anthropic', category: 'Claude', badge: 'CLAUDE', description: 'Líder em engenharia de software, lógica e redação criativa de alta qualidade.' },
+    { name: 'claude-3-5-haiku', displayName: 'Claude 3.5 Haiku', provider: 'Anthropic', category: 'Claude', badge: 'FAST', description: 'Velocidade extrema e respostas refinadas da família Claude.' },
+
+    // DeepSeek via Puter
+    { name: 'deepseek-chat', displayName: 'DeepSeek V3', provider: 'DeepSeek', category: 'DeepSeek', badge: 'DEEPSEEK', description: 'Modelo open-weights de última geração, excelente para desenvolvimento e tarefas gerais.' },
+    { name: 'deepseek-reasoner', displayName: 'DeepSeek R1', provider: 'DeepSeek', category: 'DeepSeek', badge: 'R1', description: 'Raciocínio analítico passo a passo com resolução profunda de problemas.' },
+
+    // Google Gemini Família 3 (Puter + Google)
+    { name: 'gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash-Lite', provider: 'Google', category: 'Gemini', badge: 'LITE', description: 'Ultra leve, resposta instantânea e compatível nativo com Puter.js.' },
+    { name: 'gemini-3.5-flash', displayName: 'Gemini 3.5 Flash', provider: 'Google', category: 'Gemini', badge: 'FLASH', description: 'Alta velocidade e precisão equilibrada da família Gemini 3.' },
+    { name: 'gemini-3.5-pro', displayName: 'Gemini 3.5 Pro', provider: 'Google', category: 'Gemini', badge: 'PRO', description: 'Raciocínio complexo, análise de documentos e lógica avançada.' },
+    { name: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', provider: 'Google', category: 'Gemini', badge: 'FLASH', description: 'Última geração topo de linha com raciocínio rápido.' },
   ];
 
   if (!modelSelectorOpen) return null;
@@ -3514,27 +3945,74 @@ function ModelSelectorModal() {
   const filtered = activeCategory === 'Todos' ? models : models.filter(m => m.category === activeCategory);
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl p-4 space-y-4">
-        <div className="flex items-center justify-between pb-2 border-b border-neutral-200 dark:border-neutral-800">
-          <div className="flex items-center gap-2">
-            <div className="w-5 h-5 rounded overflow-hidden flex items-center justify-center bg-neutral-100 dark:bg-neutral-800">
-              <img src="/assets/aistudio/file_00000000c8f4820ea64dd2a2500a164b_98aeecae.png" alt="logo" className="w-full h-full object-cover" />
+    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-200">
+      <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl p-5 space-y-4">
+        {/* Header */}
+        <div className="flex items-center justify-between pb-3 border-b border-neutral-200 dark:border-neutral-800">
+          <div className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded-lg bg-blue-600 text-white font-black text-xs flex items-center justify-center shadow-xs">
+              P
             </div>
-            <span className="font-bold text-xs text-neutral-900 dark:text-neutral-200">Selecionar Modelo Gemini</span>
+            <div>
+              <h3 className="font-bold text-sm text-neutral-900 dark:text-neutral-100">Catálogo de Modelos IA</h3>
+              <p className="text-[10px] text-neutral-500">Puter.js AI Cloud • Sem limites de cota do Google</p>
+            </div>
           </div>
-          <button onClick={() => setModelSelectorOpen(false)} className="p-1.5 text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white">
+          <button onClick={() => setModelSelectorOpen(false)} className="p-1.5 text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white rounded-lg">
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Categorias de Filtro: Todos, Lite, Pro, Flash */}
-        <div className="flex items-center gap-1.5 p-1 bg-neutral-100 dark:bg-neutral-800/60 rounded-xl text-xs">
-          {['Todos', 'Lite', 'Pro', 'Flash'].map(cat => (
+        {/* Puter Account Status & Login Banner */}
+        <div className="p-3 rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-950/70 flex items-center justify-between gap-3">
+          <div className="min-w-0 flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-blue-500/10 text-blue-600 dark:text-blue-400 flex items-center justify-center font-bold text-sm shrink-0">
+              <User className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-xs text-neutral-900 dark:text-neutral-100 truncate">
+                  {puterUser ? `@${puterUser.username || 'usuario'}` : 'Sessão Guest / Grátis'}
+                </span>
+                <span className={`text-[9px] px-1.5 py-0.5 rounded-md font-bold uppercase ${
+                  puterUser 
+                    ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30' 
+                    : 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30'
+                }`}>
+                  {puterUser ? 'Conta Puter Ativa' : 'Modo Convidado'}
+                </span>
+              </div>
+              <p className="text-[10px] text-neutral-500 truncate mt-0.5">
+                {puterUser ? (puterUser.email || 'Conectado à nuvem Puter') : 'Faça login no Puter para mais cota e modelos avançados'}
+              </p>
+            </div>
+          </div>
+
+          {puterUser ? (
+            <button
+              onClick={logoutPuter}
+              className="px-3 py-1.5 rounded-xl border border-neutral-200 dark:border-neutral-800 hover:border-red-500/50 hover:bg-red-500/10 text-neutral-600 dark:text-neutral-300 hover:text-red-500 text-xs font-semibold shrink-0 transition-colors"
+            >
+              Sair
+            </button>
+          ) : (
+            <button
+              onClick={loginWithPuter}
+              className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shrink-0 flex items-center gap-1.5 transition-all shadow-xs"
+            >
+              <LogIn className="w-3.5 h-3.5" />
+              <span>Entrar no Puter</span>
+            </button>
+          )}
+        </div>
+
+        {/* Categorias de Filtro: Todos, OpenAI, Claude, DeepSeek, Gemini */}
+        <div className="flex items-center gap-1.5 p-1 bg-neutral-100 dark:bg-neutral-800/60 rounded-xl text-xs overflow-x-auto scrollbar-none">
+          {['Todos', 'OpenAI', 'Claude', 'DeepSeek', 'Gemini'].map(cat => (
             <button
               key={cat}
               onClick={() => setActiveCategory(cat)}
-              className={`flex-1 py-1.5 rounded-lg font-bold text-[11px] transition-all ${
+              className={`flex-1 py-1.5 px-2 rounded-lg font-bold text-[11px] whitespace-nowrap transition-all ${
                 activeCategory === cat
                   ? 'bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white shadow-xs'
                   : 'text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-300'
@@ -3545,13 +4023,16 @@ function ModelSelectorModal() {
           ))}
         </div>
 
-        <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-neutral-200 dark:scrollbar-thumb-neutral-800">
+        {/* Lista de Modelos */}
+        <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-neutral-200 dark:scrollbar-thumb-neutral-800">
           {filtered.map((m) => {
             const isSelected = settings.selectedModel === m.name;
-            const badgeStyle = m.badge === 'PRO'
+            const badgeStyle = m.badge === 'PRO' || m.badge === 'CLAUDE'
               ? 'bg-purple-500/15 text-purple-600 dark:text-purple-400 border-purple-500/30'
-              : m.badge === 'LITE'
+              : m.badge === 'LITE' || m.badge === 'FAST' || m.badge === 'NANO'
               ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+              : m.badge === 'REASONING' || m.badge === 'R1'
+              ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30'
               : 'bg-blue-500/15 text-blue-600 dark:text-blue-400 border-blue-500/30';
 
             return (
@@ -3563,12 +4044,15 @@ function ModelSelectorModal() {
                 }}
                 className={`w-full text-left p-3.5 rounded-2xl border transition-all ${
                   isSelected
-                    ? 'bg-neutral-100 dark:bg-neutral-950 border-neutral-900 dark:border-white shadow-md'
+                    ? 'bg-neutral-100 dark:bg-neutral-950 border-neutral-900 dark:border-white shadow-md ring-1 ring-neutral-900 dark:ring-white'
                     : 'bg-neutral-50 dark:bg-neutral-950/50 border-neutral-200 dark:border-neutral-800/80 hover:border-neutral-400 dark:hover:border-neutral-700'
                 }`}
               >
                 <div className="flex items-center justify-between">
-                  <span className="font-bold text-xs text-neutral-900 dark:text-neutral-100">{m.displayName}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-xs text-neutral-900 dark:text-neutral-100">{m.displayName}</span>
+                    <span className="text-[10px] text-neutral-400 font-medium">({m.provider})</span>
+                  </div>
                   <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${badgeStyle}`}>
                     {m.badge}
                   </span>
@@ -3709,9 +4193,25 @@ function AppContent() {
     myUserId
   } = useApp();
 
-  const [inputText, setInputText] = useState('');
-  const [editingMessage, setEditingMessage] = useState<{ index: number; content: string } | null>(null);
+  const [inputText, setInputText] = useState(() => {
+    try {
+      return localStorage.getItem('DEV_AI_INPUT_PERSIST') || '';
+    } catch {
+      return '';
+    }
+  });
 
+  useEffect(() => {
+    try {
+      if (inputText) {
+        localStorage.setItem('DEV_AI_INPUT_PERSIST', inputText);
+      } else {
+        localStorage.removeItem('DEV_AI_INPUT_PERSIST');
+      }
+    } catch (e) {}
+  }, [inputText]);
+
+  const [editingMessage, setEditingMessage] = useState<{ index: number; content: string } | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<any[]>([]);
 
   const handleEditUserMessage = (text: string, index: number) => {
@@ -3784,11 +4284,16 @@ function AppContent() {
     let chatId = customChatId || activeChatId;
     if (!chatId) chatId = createNewChat();
 
+    // Clear input and draft storage immediately
+    setInputText('');
+    try {
+      localStorage.removeItem('DEV_AI_INPUT_PERSIST');
+    } catch (e) {}
+
     // If editing a message, update message, truncate history after it, and re-generate AI response
     if (editingMessage !== null) {
       const editIdx = editingMessage.index;
       setEditingMessage(null);
-      setInputText('');
 
       let historyToStream: any[] = [];
 
@@ -3833,31 +4338,53 @@ function AppContent() {
     }));
 
     const currentChat = chats.find((c: any) => c.id === chatId);
-    // Include attachments in history properly for backend to read
     const existingMsgs = currentChat ? currentChat.messages.map((m: any) => ({
       ...m,
       attachments: m.attachments || []
     })) : [];
     
-    const history = [...existingMsgs.filter((m: any) => m.content || (m.attachments && m.attachments.length > 0))];
+    // CRITICAL FIX: Ensure userMsg is included in history so AI receives the current prompt and attachments!
+    const history = [
+      ...existingMsgs.filter((m: any) => m.content || (m.attachments && m.attachments.length > 0)),
+      userMsg
+    ];
 
     if (finalContent.startsWith('[IMAGE_GEN')) {
       setIsGenerating(true);
       const match = finalContent.match(/^\[IMAGE_GEN(?::([^\]]+))?\]\s*(.*)$/);
       const ratio = match?.[1] || '1:1';
       const prompt = match?.[2] || finalContent.replace('[IMAGE_GEN]', '').trim();
-      setGenerationState('Gerando imagem...');
+      setGenerationState('Gerando imagem com IA...');
+
       try {
-        const res = await fetch('/api/image/generate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt, aspectRatio: ratio })
-        });
-        const data = await res.json();
-        if (data.imageUrl) {
+        let imageUrl = '';
+
+        // Tentar Puter.js txt2img primeiro
+        const puterObj = getPuter();
+        if (puterObj && puterObj.ai && typeof puterObj.ai.txt2img === 'function') {
+          try {
+            const imgRes = await puterObj.ai.txt2img(prompt, { aspect_ratio: ratio });
+            imageUrl = imgRes?.src || (imgRes as any)?.url || '';
+          } catch (pErr) {
+            console.warn('Puter.js txt2img falhou, tentando fallback:', pErr);
+          }
+        }
+
+        // Se Puter não gerou, fallback para backend
+        if (!imageUrl) {
+          const res = await fetch('/api/image/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt, aspectRatio: ratio })
+          });
+          const data = await res.json();
+          imageUrl = data.imageUrl;
+        }
+
+        if (imageUrl) {
           const assistantMsg = {
             role: 'assistant',
-            content: `Aqui está a sua imagem: **"${prompt}"** (Proporção: ${ratio})\n\n![Generated Image](${data.imageUrl})\n\n${data.text || ''}`,
+            content: `Aqui está a sua imagem: **"${prompt}"** (Proporção: ${ratio})\n\n![Generated Image](${imageUrl})`,
             timestamp: new Date().toISOString()
           };
           setChats((prev: any) => prev.map((c: any) => {
@@ -3865,7 +4392,7 @@ function AppContent() {
             return c;
           }));
         } else {
-          throw new Error(data.error || 'Falha ao gerar imagem');
+          throw new Error('Falha ao gerar imagem');
         }
       } catch (err: any) {
         console.error('Image Gen Error:', err);

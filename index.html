@@ -19,6 +19,17 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      if (typeof window !== 'undefined' && window.customElements) {
+        const _origDefine = window.customElements.define.bind(window.customElements);
+        window.customElements.define = function(name, constructor, options) {
+          if (!window.customElements.get(name)) {
+            _origDefine(name, constructor, options);
+          }
+        };
+      }
+    </script>
+    <script src="https://js.puter.com/v2/"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

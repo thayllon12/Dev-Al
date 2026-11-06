@@ -144,10 +144,11 @@ ATENÇÃO: Você DEVE encarnar e obedecer 100% da personalidade e tom acima sem 
 
     for (const modelToTry of [...new Set(fallbackModels)]) {
       try {
-        const responseStream = await ai.models.generateContentStream({
+        const responseStream = await (ai.models as any).generateContentStream({
           model: modelToTry,
           contents: formattedContents,
           config: {
+            maxOutputTokens: 65536,
             systemInstruction: {
               parts: [{ text: systemPromptText }]
             }

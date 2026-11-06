@@ -1,6 +1,6 @@
 {
-  "summary": "Plano para corrigir o posicionamento e o z-index dos menus de contexto das mensagens (IA e Usuário) para garantir que fiquem sempre visíveis e acima das outras mensagens.",
-  "updatedAt": "2026-11-02T19:21:50.138868863Z",
+  "summary": "Puter.js integration with real-time streaming, multimodal context, input persistence, and external attachment layout implemented and verified.",
+  "updatedAt": "2026-11-06T04:39:30.098279353Z",
   "requestFeedback": true,
   "userFacing": true
 }
